@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <uses-feature
+        android:name="android.software.activities_on_secondary_displays"
+        android:required="false" />
+
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.REORDER_TASKS" />
+    <uses-permission
+        android:name="android.permission.MANAGE_ACTIVITY_TASKS"
+        tools:ignore="ProtectedPermissions" />
+    <uses-permission
+        android:name="android.permission.INTERNAL_SYSTEM_WINDOW"
+        tools:ignore="ProtectedPermissions" />
+
+    <application
+        android:allowBackup="true"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/backup_rules"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:resizeableActivity="true"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.AgentHost"
+        tools:targetApi="31">
+        <service
+            android:name=".overlay.OverlayEntryService"
+            android:exported="false" />
+
+        <activity
+            android:name=".session.SessionRootActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:taskAffinity="com.example.agenthost.session"
+            android:theme="@style/Theme.AgentHost" />
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:theme="@style/Theme.AgentHost">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+
+</manifest>
