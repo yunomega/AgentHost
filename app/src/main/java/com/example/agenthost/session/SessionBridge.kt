@@ -17,14 +17,25 @@ object SessionBridge {
         Log.i(TAG, "registerWaiter sessionId=$sessionId")
     }
 
-    fun reportAttached(ack: SessionAttachAck) {
-        val future = waiters.computeIfAbsent(ack.sessionId) { CompletableFuture() }
+    fun reportAttached(ack: SessionAttachAck): Boolean {
+        val future = waiters[ack.sessionId]
+        if (future == null) {
+            Log.w(
+                TAG,
+                "reportAttached ignored sessionId=${ack.sessionId} taskId=${ack.taskId} " +
+                    "displayId=${ack.displayId} reason=NO_WAITER component=${ack.component}"
+            )
+            return false
+        }
         val accepted = future.complete(ack)
-        Log.i(
-            TAG,
-            "reportAttached sessionId=${ack.sessionId} taskId=${ack.taskId} " +
-                "displayId=${ack.displayId} accepted=$accepted component=${ack.component}"
-        )
+        val message = "reportAttached sessionId=${ack.sessionId} taskId=${ack.taskId} " +
+            "displayId=${ack.displayId} accepted=$accepted component=${ack.component}"
+        if (accepted) {
+            Log.i(TAG, message)
+        } else {
+            Log.w(TAG, message)
+        }
+        return accepted
     }
 
     fun await(sessionId: String, timeoutMs: Long): SessionAttachAck? {

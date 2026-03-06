@@ -51,7 +51,7 @@ class SessionRootActivity : Activity() {
                     "extras=currentDisplayId=$currentDisplayId reportedDisplayId=$reportedDisplayId"
             )
         } else {
-            SessionBridge.reportAttached(
+            val accepted = SessionBridge.reportAttached(
                 SessionAttachAck(
                     sessionId = sessionId,
                     taskId = currentTaskId,
@@ -59,10 +59,11 @@ class SessionRootActivity : Activity() {
                     component = component
                 )
             )
+            val attachCode = if (accepted) "ATTACH_REPORTED" else "ATTACH_IGNORED_NO_WAITER"
             Log.i(
                 TAG,
                 "event=session_root_attach sessionId=$sessionId vdDisplayId=$expectedDisplayId " +
-                    "sessionTaskId=$currentTaskId code=ATTACH_REPORTED " +
+                    "sessionTaskId=$currentTaskId code=$attachCode " +
                     "extras=currentDisplayId=$currentDisplayId reportedDisplayId=$reportedDisplayId " +
                     "component=$component command=$command"
             )
