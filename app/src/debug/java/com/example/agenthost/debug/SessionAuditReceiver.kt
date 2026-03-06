@@ -116,10 +116,14 @@ class SessionAuditReceiver : BroadcastReceiver() {
         val sessionTaskId = result.data["taskId"] ?: -1
         val step = result.data["automationStep"] ?: 0
         val actionType = result.data["actionType"] ?: "NONE"
+        val status = result.data["status"] ?: "null"
+        val waitingQuestion = (result.data["waitingQuestion"] ?: "null").toString()
+            .replace("\n", "\\n")
         Log.i(
             TAG,
             "event=$event sessionId=$sessionId vdDisplayId=$vdDisplayId " +
                 "sessionTaskId=$sessionTaskId step=$step actionType=$actionType " +
+                "status=$status waitingQuestion=$waitingQuestion " +
                 "code=${result.code} extras=ok=${result.ok} $extras"
         )
     }

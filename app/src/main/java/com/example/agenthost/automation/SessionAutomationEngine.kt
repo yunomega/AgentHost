@@ -101,12 +101,25 @@ class SessionAutomationEngine(
     }
 
     private fun runLoop(sessionId: String, control: LoopControl) {
-        val capabilities = actionExecutor.capabilities()
+        val bootstrapSnapshot = callbacks.getSnapshot(sessionId)
+        val bootstrapDisplayId = bootstrapSnapshot?.vdDisplayId ?: -1
+        val bootstrapTaskId = bootstrapSnapshot?.sessionTaskId ?: -1
         log(
             event = "automation_start",
             sessionId = sessionId,
-            vdDisplayId = -1,
-            sessionTaskId = -1,
+            vdDisplayId = bootstrapDisplayId,
+            sessionTaskId = bootstrapTaskId,
+            step = 0,
+            actionType = "NONE",
+            code = "AUTOMATION_STARTED"
+        )
+
+        val capabilities = actionExecutor.capabilities()
+        log(
+            event = "executor_probe",
+            sessionId = sessionId,
+            vdDisplayId = bootstrapDisplayId,
+            sessionTaskId = bootstrapTaskId,
             step = 0,
             actionType = "NONE",
             code = capabilities.code,
@@ -119,8 +132,8 @@ class SessionAutomationEngine(
                 log(
                     event = "automation_stopped",
                     sessionId = sessionId,
-                    vdDisplayId = -1,
-                    sessionTaskId = -1,
+                    vdDisplayId = bootstrapDisplayId,
+                    sessionTaskId = bootstrapTaskId,
                     step = loopCount,
                     actionType = "NONE",
                     code = "STOP_REQUESTED"
