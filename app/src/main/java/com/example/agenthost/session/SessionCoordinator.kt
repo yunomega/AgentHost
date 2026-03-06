@@ -4,6 +4,15 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.util.Log
+import com.example.agenthost.automation.AutomationHistory
+import com.example.agenthost.automation.AutomationSessionSnapshot
+import com.example.agenthost.automation.AutomationStateCallbacks
+import com.example.agenthost.automation.DisplayActionExecutor
+import com.example.agenthost.automation.PlanningAdapter
+import com.example.agenthost.automation.ScriptedStepPlanningAdapter
+import com.example.agenthost.automation.SessionAutomationEngine
+import com.example.agenthost.automation.ShellDisplayActionExecutor
+import com.example.agenthost.automation.VdObservationProvider
 import com.example.agenthost.debug.SessionAuditHooks
 import com.example.agenthost.migration.TaskMigrationController
 import com.example.agenthost.runtime.VirtualDisplayRuntime
@@ -24,6 +33,112 @@ class SessionCoordinator(
     private var activeSession: SessionState? = null
     private var activeRuntime: VirtualDisplayRuntime.RuntimeHandle? = null
 
+    private val automationHistory = AutomationHistory()
+    private val planningAdapter: PlanningAdapter = ScriptedStepPlanningAdapter(automationHistory)
+    private val actionExecutor: DisplayActionExecutor = ShellDisplayActionExecutor()
+    private val automationEngine: SessionAutomationEngine = SessionAutomationEngine(
+        callbacks = object : AutomationStateCallbacks {
+            override fun getSnapshot(sessionId: String): AutomationSessionSnapshot? {
+                return synchronized(lock) {
+                    val state = activeSession ?: return@synchronized null
+                    if (state.sessionId != sessionId) {
+                        return@synchronized null
+                    }
+                    AutomationSessionSnapshot(
+                        sessionId = state.sessionId,
+                        command = state.command,
+                        vdDisplayId = state.vdDisplayId,
+                        sessionTaskId = state.sessionTaskId,
+                        status = state.status,
+                        runtimeHandle = activeRuntime
+                    )
+                }
+            }
+
+            override fun onSessionWaitingUser(sessionId: String, step: Int, question: String) {
+                synchronized(lock) {
+                    val state = activeSession ?: return
+                    if (state.sessionId != sessionId || state.status != SessionStatus.RUNNING) {
+                        return
+                    }
+                    val waiting = state.copy(
+                        status = SessionStatus.WAITING_USER,
+                        waitingQuestion = question,
+                        automationStep = step,
+                        lastError = null
+                    )
+                    activeSession = waiting
+                    logInfo(
+                        event = "session_waiting_user",
+                        state = waiting,
+                        step = step,
+                        actionType = "ASK_USER",
+                        code = "WAITING_USER",
+                        extras = "question=$question"
+                    )
+                }
+            }
+
+            override fun onSessionCompleted(sessionId: String, step: Int, reason: String) {
+                synchronized(lock) {
+                    val state = activeSession ?: return
+                    if (state.sessionId != sessionId || state.status != SessionStatus.RUNNING) {
+                        return
+                    }
+                    val completed = state.copy(
+                        status = SessionStatus.COMPLETED,
+                        waitingQuestion = null,
+                        automationStep = step,
+                        lastError = null
+                    )
+                    activeSession = completed
+                    logInfo(
+                        event = "session_completed",
+                        state = completed,
+                        step = step,
+                        actionType = "DONE",
+                        code = "COMPLETED",
+                        extras = "reason=$reason"
+                    )
+                }
+            }
+
+            override fun onSessionFailed(sessionId: String, step: Int, code: String, details: String) {
+                synchronized(lock) {
+                    val state = activeSession ?: return
+                    if (state.sessionId != sessionId) {
+                        return
+                    }
+                    if (state.status == SessionStatus.STOPPING ||
+                        state.status == SessionStatus.MIGRATED ||
+                        state.status == SessionStatus.CLOSED
+                    ) {
+                        return
+                    }
+                    val failed = state.copy(
+                        status = SessionStatus.FAILED,
+                        waitingQuestion = null,
+                        automationStep = step,
+                        lastError = code
+                    )
+                    activeSession = failed
+                    logError(
+                        event = "session_failed",
+                        state = failed,
+                        step = step,
+                        actionType = "NONE",
+                        code = code,
+                        extras = "details=$details"
+                    )
+                }
+            }
+        },
+        observationProvider = VdObservationProvider(),
+        planningAdapter = planningAdapter,
+        actionExecutor = actionExecutor,
+        history = automationHistory
+    )
+
     fun startSession(command: String): SessionResult = synchronized(lock) {
         val sessionId = UUID.randomUUID().toString()
         logInfo(
@@ -31,6 +146,8 @@ class SessionCoordinator(
             sessionId = sessionId,
             vdDisplayId = -1,
             sessionTaskId = INVALID_TASK_ID,
+            step = 0,
+            actionType = "NONE",
             code = "START_BEGIN",
             extras = "command=$command"
         )
@@ -56,7 +173,9 @@ class SessionCoordinator(
             vdDisplayId = vdDisplayId,
             sessionTaskId = INVALID_TASK_ID,
             status = SessionStatus.STARTING,
-            lastError = null
+            lastError = null,
+            waitingQuestion = null,
+            automationStep = 0
         )
         activeRuntime = runtime
         activeSession = state
@@ -64,6 +183,8 @@ class SessionCoordinator(
         logInfo(
             event = "vd_created",
             state = state,
+            step = 0,
+            actionType = "NONE",
             code = "VD_CREATED",
             extras = "command=$command"
         )
@@ -98,6 +219,8 @@ class SessionCoordinator(
             logError(
                 event = "session_root_launch_failed",
                 state = state,
+                step = 0,
+                actionType = "NONE",
                 code = code,
                 extras = "command=$command",
                 error = t
@@ -115,6 +238,8 @@ class SessionCoordinator(
             logError(
                 event = "session_display_mismatch",
                 state = state,
+                step = 0,
+                actionType = "NONE",
                 code = "SESSION_DISPLAY_MISMATCH",
                 extras = "reportedDisplayId=${ack.displayId}"
             )
@@ -134,12 +259,16 @@ class SessionCoordinator(
         state = state.copy(
             sessionTaskId = ack.taskId,
             status = SessionStatus.READY,
-            lastError = null
+            lastError = null,
+            waitingQuestion = null,
+            automationStep = 0
         )
         activeSession = state
         logInfo(
             event = "session_ready",
             state = state,
+            step = 0,
+            actionType = "NONE",
             code = "SESSION_READY",
             extras = "component=${ack.component}"
         )
@@ -150,9 +279,9 @@ class SessionCoordinator(
         )
     }
 
-    fun markRunning(sessionId: String? = null): SessionResult = synchronized(lock) {
+    fun startAutomation(sessionId: String): SessionResult = synchronized(lock) {
         val state = activeSession ?: return@synchronized failResult("NO_ACTIVE_SESSION")
-        if (sessionId != null && state.sessionId != sessionId) {
+        if (state.sessionId != sessionId) {
             return@synchronized failResult(
                 code = "SESSION_ID_MISMATCH",
                 data = mapOf("expected" to state.sessionId, "actual" to sessionId)
@@ -164,14 +293,118 @@ class SessionCoordinator(
                 data = stateData(state)
             )
         }
-        val running = state.copy(status = SessionStatus.RUNNING, lastError = null)
-        activeSession = running
-        logInfo(
-            event = "mark_running",
-            state = running,
-            code = "RUNNING"
+        if (state.sessionTaskId <= 0) {
+            return@synchronized failResult(
+                code = "SESSION_TASK_INVALID",
+                data = stateData(state)
+            )
+        }
+
+        val running = state.copy(
+            status = SessionStatus.RUNNING,
+            waitingQuestion = null,
+            automationStep = 0,
+            lastError = null
         )
-        okResult(code = "RUNNING", state = running)
+        activeSession = running
+        val result = automationEngine.startAutomation(sessionId)
+        return@synchronized if (result.ok) {
+            logInfo(
+                event = "automation_start",
+                state = running,
+                step = 0,
+                actionType = "NONE",
+                code = result.code,
+                extras = "details=${result.details}"
+            )
+            okResult(
+                code = result.code,
+                state = running,
+                extra = mapOf("details" to result.details)
+            )
+        } else {
+            val failed = running.copy(
+                status = SessionStatus.FAILED,
+                lastError = result.code
+            )
+            activeSession = failed
+            logError(
+                event = "session_failed",
+                state = failed,
+                step = failed.automationStep,
+                actionType = "NONE",
+                code = result.code,
+                extras = "details=${result.details}"
+            )
+            failResult(result.code, stateData(failed) + mapOf("details" to result.details))
+        }
+    }
+
+    fun replyToSession(sessionId: String, userText: String): SessionResult = synchronized(lock) {
+        val state = activeSession ?: return@synchronized failResult("NO_ACTIVE_SESSION")
+        if (state.sessionId != sessionId) {
+            return@synchronized failResult(
+                code = "SESSION_ID_MISMATCH",
+                data = mapOf("expected" to state.sessionId, "actual" to sessionId)
+            )
+        }
+        if (state.status != SessionStatus.WAITING_USER) {
+            return@synchronized failResult(
+                code = "SESSION_NOT_WAITING_USER",
+                data = stateData(state)
+            )
+        }
+        val trimmed = userText.trim()
+        if (trimmed.isEmpty()) {
+            return@synchronized failResult(
+                code = "USER_REPLY_EMPTY",
+                data = stateData(state)
+            )
+        }
+
+        val running = state.copy(
+            status = SessionStatus.RUNNING,
+            waitingQuestion = null,
+            lastError = null
+        )
+        activeSession = running
+        val result = automationEngine.replyToSession(sessionId, trimmed)
+        return@synchronized if (result.ok) {
+            logInfo(
+                event = "automation_start",
+                state = running,
+                step = running.automationStep,
+                actionType = "NONE",
+                code = "AUTOMATION_RESUMED",
+                extras = "details=${result.details}"
+            )
+            okResult(
+                code = "AUTOMATION_RESUMED",
+                state = running,
+                extra = mapOf("details" to result.details)
+            )
+        } else {
+            val failed = running.copy(
+                status = SessionStatus.FAILED,
+                lastError = result.code
+            )
+            activeSession = failed
+            logError(
+                event = "session_failed",
+                state = failed,
+                step = failed.automationStep,
+                actionType = "NONE",
+                code = result.code,
+                extras = "details=${result.details}"
+            )
+            failResult(result.code, stateData(failed) + mapOf("details" to result.details))
+        }
+    }
+
+    fun markRunning(sessionId: String? = null): SessionResult = synchronized(lock) {
+        val state = activeSession ?: return@synchronized failResult("NO_ACTIVE_SESSION")
+        val targetSessionId = sessionId ?: state.sessionId
+        startAutomation(targetSessionId)
     }
 
     fun stopSession(migrate: Boolean): SessionResult = synchronized(lock) {
@@ -186,6 +419,8 @@ class SessionCoordinator(
                 sessionId = null,
                 vdDisplayId = -1,
                 sessionTaskId = INVALID_TASK_ID,
+                step = 0,
+                actionType = "NONE",
                 code = "NO_ACTIVE_SESSION"
             )
             failResult(code = "NO_ACTIVE_SESSION")
@@ -193,6 +428,8 @@ class SessionCoordinator(
             logInfo(
                 event = "dump_active_session",
                 state = state,
+                step = state.automationStep,
+                actionType = "NONE",
                 code = "DUMP_ACTIVE_SESSION"
             )
             okResult(code = "DUMP_ACTIVE_SESSION", state = state)
@@ -203,13 +440,29 @@ class SessionCoordinator(
 
     private fun stopSessionLocked(migrate: Boolean, preemptive: Boolean): SessionResult {
         val state = activeSession ?: return failResult("NO_ACTIVE_SESSION")
-        val stopping = state.copy(status = SessionStatus.STOPPING, lastError = null)
+        val stopping = state.copy(
+            status = SessionStatus.STOPPING,
+            lastError = null,
+            waitingQuestion = null
+        )
         activeSession = stopping
         logInfo(
             event = "stop_session_begin",
             state = stopping,
+            step = stopping.automationStep,
+            actionType = "NONE",
             code = "STOP_BEGIN",
             extras = "migrate=$migrate preemptive=$preemptive"
+        )
+
+        val stopResult = automationEngine.stopAutomation(stopping.sessionId)
+        logInfo(
+            event = "automation_stopped",
+            state = stopping,
+            step = stopping.automationStep,
+            actionType = "NONE",
+            code = stopResult.code,
+            extras = "details=${stopResult.details}"
         )
 
         val taskId = stopping.sessionTaskId
@@ -231,6 +484,8 @@ class SessionCoordinator(
                 logInfo(
                     event = "migration_forced_failure",
                     state = stopping,
+                    step = stopping.automationStep,
+                    actionType = "NONE",
                     code = "FORCED_MIGRATION_FAILURE"
                 )
                 false
@@ -244,17 +499,22 @@ class SessionCoordinator(
         return if (success) {
             val finalStatus = if (migrate) SessionStatus.MIGRATED else SessionStatus.CLOSED
             val finalCode = if (migrate) "MIGRATED_TO_DEFAULT_DISPLAY" else "CLOSED"
-            activeSession = stopping.copy(status = finalStatus, lastError = null)
+            val finalState = stopping.copy(
+                status = finalStatus,
+                lastError = null,
+                waitingQuestion = null
+            )
+            activeSession = finalState
             logInfo(
                 event = if (migrate) "session_migrated" else "session_closed",
-                sessionId = stopping.sessionId,
-                vdDisplayId = stopping.vdDisplayId,
-                sessionTaskId = taskId,
+                state = finalState,
+                step = finalState.automationStep,
+                actionType = "NONE",
                 code = finalCode
             )
             val result = okResult(
                 code = finalCode,
-                state = activeSession,
+                state = finalState,
                 extra = mapOf("migrate" to migrate)
             )
             cleanupLocked(stopping.sessionId)
@@ -269,11 +529,17 @@ class SessionCoordinator(
 
     private fun failAndCleanupLocked(code: String, state: SessionState?): SessionResult {
         if (state != null) {
-            val failedState = state.copy(status = SessionStatus.FAILED, lastError = code)
+            val failedState = state.copy(
+                status = SessionStatus.FAILED,
+                lastError = code,
+                waitingQuestion = null
+            )
             activeSession = failedState
             logError(
                 event = "session_failed",
                 state = failedState,
+                step = failedState.automationStep,
+                actionType = "NONE",
                 code = code
             )
             cleanupLocked(state.sessionId)
@@ -285,13 +551,18 @@ class SessionCoordinator(
             sessionId = null,
             vdDisplayId = -1,
             sessionTaskId = INVALID_TASK_ID,
+            step = 0,
+            actionType = "NONE",
             code = code
         )
         return failResult(code = code)
     }
 
     private fun cleanupLocked(sessionId: String?) {
-        sessionId?.let { SessionBridge.clear(it) }
+        sessionId?.let {
+            SessionBridge.clear(it)
+            automationEngine.clearSession(it)
+        }
         activeRuntime?.release()
         activeRuntime = null
         activeSession = null
@@ -327,7 +598,10 @@ class SessionCoordinator(
             "taskId" to state.sessionTaskId,
             "status" to state.status.name,
             "command" to state.command,
-            "lastError" to state.lastError
+            "lastError" to state.lastError,
+            "waitingQuestion" to state.waitingQuestion,
+            "automationStep" to state.automationStep,
+            "actionType" to "NONE"
         )
     }
 
@@ -337,6 +611,8 @@ class SessionCoordinator(
         sessionId: String? = null,
         vdDisplayId: Int? = null,
         sessionTaskId: Int? = null,
+        step: Int? = null,
+        actionType: String? = null,
         code: String,
         extras: String? = null
     ) {
@@ -348,6 +624,8 @@ class SessionCoordinator(
                 sessionId = sessionId,
                 vdDisplayId = vdDisplayId,
                 sessionTaskId = sessionTaskId,
+                step = step,
+                actionType = actionType,
                 code = code,
                 extras = extras
             )
@@ -360,6 +638,8 @@ class SessionCoordinator(
         sessionId: String? = null,
         vdDisplayId: Int? = null,
         sessionTaskId: Int? = null,
+        step: Int? = null,
+        actionType: String? = null,
         code: String,
         extras: String? = null,
         error: Throwable? = null
@@ -370,6 +650,8 @@ class SessionCoordinator(
             sessionId = sessionId,
             vdDisplayId = vdDisplayId,
             sessionTaskId = sessionTaskId,
+            step = step,
+            actionType = actionType,
             code = code,
             extras = extras
         )
@@ -386,13 +668,18 @@ class SessionCoordinator(
         sessionId: String?,
         vdDisplayId: Int?,
         sessionTaskId: Int?,
+        step: Int?,
+        actionType: String?,
         code: String,
         extras: String?
     ): String {
         val sid = sessionId ?: state?.sessionId ?: "null"
         val did = vdDisplayId ?: state?.vdDisplayId ?: -1
         val tid = sessionTaskId ?: state?.sessionTaskId ?: INVALID_TASK_ID
+        val stp = step ?: state?.automationStep ?: 0
+        val at = actionType ?: "NONE"
         val ext = extras ?: "{}"
-        return "event=$event sessionId=$sid vdDisplayId=$did sessionTaskId=$tid code=$code extras=$ext"
+        return "event=$event sessionId=$sid vdDisplayId=$did sessionTaskId=$tid " +
+            "step=$stp actionType=$at code=$code extras=$ext"
     }
 }

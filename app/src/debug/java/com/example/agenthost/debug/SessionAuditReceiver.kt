@@ -16,6 +16,8 @@ class SessionAuditReceiver : BroadcastReceiver() {
         private const val EXTRA_FORCE_REPORT_DISPLAY_ID = "force_report_display_id"
         private const val EXTRA_MIGRATE = "migrate"
         private const val EXTRA_FORCE_MIGRATION_FAIL = "force_migration_fail"
+        private const val EXTRA_SESSION_ID = "session_id"
+        private const val EXTRA_USER_TEXT = "user_text"
 
         private val worker = Executors.newSingleThreadExecutor()
     }
@@ -46,7 +48,7 @@ class SessionAuditReceiver : BroadcastReceiver() {
                     skipAttach = skipAttach,
                     forceReportDisplayId = forceReportDisplayId
                 )
-                val result = AgentHostRuntime.sessionCoordinator(context).startSession(command)
+                val result = startWithAutomation(context, command)
                 logResult(
                     event = "debug_start_session",
                     result = result,
@@ -66,6 +68,18 @@ class SessionAuditReceiver : BroadcastReceiver() {
                 )
             }
 
+            "$pkg.debug.REPLY_SESSION" -> {
+                val sessionId = intent.getStringExtra(EXTRA_SESSION_ID).orEmpty()
+                val userText = intent.getStringExtra(EXTRA_USER_TEXT).orEmpty()
+                val result = AgentHostRuntime.sessionCoordinator(context)
+                    .replyToSession(sessionId, userText)
+                logResult(
+                    event = "debug_reply_session",
+                    result = result,
+                    extras = "sessionId=$sessionId userTextLength=${userText.length}"
+                )
+            }
+
             "$pkg.debug.DUMP_ACTIVE_SESSION" -> {
                 val result = AgentHostRuntime.sessionCoordinator(context).dumpActiveSession()
                 logResult(
@@ -81,14 +95,32 @@ class SessionAuditReceiver : BroadcastReceiver() {
         }
     }
 
+    private fun startWithAutomation(context: Context, command: String): SessionResult {
+        val coordinator = AgentHostRuntime.sessionCoordinator(context)
+        val startResult = coordinator.startSession(command)
+        if (!startResult.ok) {
+            return startResult
+        }
+        val sessionId = startResult.data["sessionId"] as? String
+            ?: return SessionResult(
+                ok = false,
+                code = "SESSION_ID_MISSING",
+                data = startResult.data
+            )
+        return coordinator.startAutomation(sessionId)
+    }
+
     private fun logResult(event: String, result: SessionResult, extras: String) {
         val sessionId = result.data["sessionId"] ?: "null"
         val vdDisplayId = result.data["displayId"] ?: -1
         val sessionTaskId = result.data["taskId"] ?: -1
+        val step = result.data["automationStep"] ?: 0
+        val actionType = result.data["actionType"] ?: "NONE"
         Log.i(
             TAG,
             "event=$event sessionId=$sessionId vdDisplayId=$vdDisplayId " +
-                "sessionTaskId=$sessionTaskId code=${result.code} extras=ok=${result.ok} $extras"
+                "sessionTaskId=$sessionTaskId step=$step actionType=$actionType " +
+                "code=${result.code} extras=ok=${result.ok} $extras"
         )
     }
 }

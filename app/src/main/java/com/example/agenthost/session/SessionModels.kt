@@ -6,7 +6,9 @@ data class SessionState(
     val vdDisplayId: Int,
     val sessionTaskId: Int,
     val status: SessionStatus,
-    val lastError: String?
+    val lastError: String?,
+    val waitingQuestion: String?,
+    val automationStep: Int
 )
 
 enum class SessionStatus {
@@ -14,10 +16,12 @@ enum class SessionStatus {
     STARTING,
     READY,
     RUNNING,
+    WAITING_USER,
     STOPPING,
     MIGRATED,
     CLOSED,
-    FAILED
+    FAILED,
+    COMPLETED
 }
 
 data class SessionAttachAck(

@@ -19,11 +19,16 @@ class OverlayEntryService : Service() {
 
     inner class LocalBinder : Binder() {
         fun start(command: String): SessionResult {
-            return AgentHostRuntime.sessionCoordinator(applicationContext).startSession(command)
+            return startWithAutomation(command)
         }
 
         fun stop(migrate: Boolean): SessionResult {
             return AgentHostRuntime.sessionCoordinator(applicationContext).stopSession(migrate)
+        }
+
+        fun reply(sessionId: String, userText: String): SessionResult {
+            return AgentHostRuntime.sessionCoordinator(applicationContext)
+                .replyToSession(sessionId, userText)
         }
     }
 
@@ -36,17 +41,8 @@ class OverlayEntryService : Service() {
             OverlayActions.ACTION_START_SESSION -> {
                 val command = intent.getStringExtra(OverlayActions.EXTRA_COMMAND).orEmpty()
                 worker.execute {
-                    val coordinator = AgentHostRuntime.sessionCoordinator(applicationContext)
-                    val result = coordinator.startSession(command)
+                    val result = startWithAutomation(command)
                     Log.i(TAG, "start result code=${result.code} ok=${result.ok} data=${result.data}")
-                    if (result.ok) {
-                        val sessionId = result.data["sessionId"] as? String
-                        val running = coordinator.markRunning(sessionId)
-                        Log.i(
-                            TAG,
-                            "markRunning result code=${running.code} ok=${running.ok} data=${running.data}"
-                        )
-                    }
                 }
             }
 
@@ -56,6 +52,16 @@ class OverlayEntryService : Service() {
                     val result = AgentHostRuntime.sessionCoordinator(applicationContext)
                         .stopSession(migrate)
                     Log.i(TAG, "stop result code=${result.code} ok=${result.ok} data=${result.data}")
+                }
+            }
+
+            OverlayActions.ACTION_REPLY_SESSION -> {
+                val sessionId = intent.getStringExtra(OverlayActions.EXTRA_SESSION_ID).orEmpty()
+                val userText = intent.getStringExtra(OverlayActions.EXTRA_USER_TEXT).orEmpty()
+                worker.execute {
+                    val result = AgentHostRuntime.sessionCoordinator(applicationContext)
+                        .replyToSession(sessionId, userText)
+                    Log.i(TAG, "reply result code=${result.code} ok=${result.ok} data=${result.data}")
                 }
             }
 
@@ -69,5 +75,20 @@ class OverlayEntryService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         worker.shutdownNow()
+    }
+
+    private fun startWithAutomation(command: String): SessionResult {
+        val coordinator = AgentHostRuntime.sessionCoordinator(applicationContext)
+        val startResult = coordinator.startSession(command)
+        if (!startResult.ok) {
+            return startResult
+        }
+        val sessionId = startResult.data["sessionId"] as? String
+            ?: return SessionResult(
+                ok = false,
+                code = "SESSION_ID_MISSING",
+                data = startResult.data
+            )
+        return coordinator.startAutomation(sessionId)
     }
 }
