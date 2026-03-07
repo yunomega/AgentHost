@@ -79,12 +79,14 @@ tail_platform() {
   adb_cmd shell dumpsys agenthost_platform | tail -n "${1:-${TAIL_LINES}}"
 }
 
+dump_platform() {
+  log "dumpsys agenthost_platform"
+  adb_cmd shell dumpsys agenthost_platform
+}
+
 service_check() {
   log "service check"
   adb_cmd shell service check agenthost_platform
-  echo
-  log "dumpsys agenthost_platform"
-  adb_cmd shell dumpsys agenthost_platform
 }
 
 unauthorized_check() {
@@ -172,6 +174,10 @@ smoke_text() {
   start_and_dump type_text "{\"steps\":[{\"action\":\"WAIT\",\"durationMs\":500},{\"action\":\"TYPE_TEXT\",\"text\":\"${text}\"},{\"action\":\"DONE\",\"reason\":\"text-smoke\"}]}" 3
 }
 
+smoke_long_press() {
+  start_and_dump long_press '{"steps":[{"action":"WAIT","durationMs":500},{"action":"LONG_PRESS","x":540,"y":960,"durationMs":800},{"action":"DONE","reason":"long-press-smoke"}]}' 4
+}
+
 smoke_ask_reply() {
   local user_text="${1:-${DEFAULT_TEXT}}"
   log "start ask-reply"
@@ -216,9 +222,9 @@ deploy_app() {
 smoke_basic() {
   service_check
   echo
-  unauthorized_check
+  dump_platform
   echo
-  display_snapshot
+  unauthorized_check
   echo
   smoke_capture
   echo
@@ -229,14 +235,40 @@ smoke_basic() {
   smoke_back
   echo
   smoke_home
-}
-
-smoke_full() {
-  smoke_basic
   echo
   smoke_text "${DEFAULT_TEXT}"
   echo
   smoke_ask_reply "${DEFAULT_TEXT}"
+}
+
+smoke_extended() {
+  service_check
+  echo
+  dump_platform
+  echo
+  unauthorized_check
+  echo
+  smoke_capture
+  echo
+  smoke_click
+  echo
+  smoke_swipe
+  echo
+  smoke_back
+  echo
+  smoke_home
+  echo
+  smoke_text "${DEFAULT_TEXT}"
+  echo
+  smoke_ask_reply "${DEFAULT_TEXT}"
+  echo
+  smoke_long_press
+  echo
+  display_snapshot
+}
+
+smoke_full() {
+  smoke_extended
 }
 
 usage() {
@@ -247,6 +279,7 @@ Usage:
   scripts/verify_p25.sh deploy-app
   scripts/verify_p25.sh logs
   scripts/verify_p25.sh service-check
+  scripts/verify_p25.sh dumpsys
   scripts/verify_p25.sh unauthorized-check
   scripts/verify_p25.sh display-snapshot
   scripts/verify_p25.sh tail-platform [lines]
@@ -255,9 +288,12 @@ Usage:
   scripts/verify_p25.sh swipe
   scripts/verify_p25.sh back
   scripts/verify_p25.sh home
+  scripts/verify_p25.sh long-press
   scripts/verify_p25.sh text [ascii_text]
   scripts/verify_p25.sh ask-reply [reply_text]
+  scripts/verify_p25.sh regression
   scripts/verify_p25.sh smoke-basic
+  scripts/verify_p25.sh smoke-extended
   scripts/verify_p25.sh smoke-full
 
 Env:
@@ -271,6 +307,8 @@ Examples:
   LUNCH_TARGET=rk3588_xxx-userdebug scripts/verify_p25.sh build-fw
   scripts/verify_p25.sh flash-fw
   scripts/verify_p25.sh deploy-app
+  scripts/verify_p25.sh regression
+  scripts/verify_p25.sh long-press
   scripts/verify_p25.sh smoke-basic
   scripts/verify_p25.sh text hello123
   scripts/verify_p25.sh ask-reply hello123
@@ -287,6 +325,7 @@ main() {
     deploy-app) deploy_app ;;
     logs) logs ;;
     service-check) service_check ;;
+    dumpsys) dump_platform ;;
     unauthorized-check) unauthorized_check ;;
     display-snapshot) display_snapshot ;;
     tail-platform) tail_platform "${2:-${TAIL_LINES}}" ;;
@@ -295,9 +334,12 @@ main() {
     swipe) smoke_swipe ;;
     back) smoke_back ;;
     home) smoke_home ;;
+    long-press) smoke_long_press ;;
     text) smoke_text "${2:-${DEFAULT_TEXT}}" ;;
     ask-reply) smoke_ask_reply "${2:-${DEFAULT_TEXT}}" ;;
+    regression) smoke_basic ;;
     smoke-basic) smoke_basic ;;
+    smoke-extended) smoke_extended ;;
     smoke-full) smoke_full ;;
     *) usage ;;
   esac
