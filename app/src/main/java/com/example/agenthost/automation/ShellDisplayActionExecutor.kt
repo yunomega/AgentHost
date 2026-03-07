@@ -13,7 +13,9 @@ class ShellDisplayActionExecutor : DisplayActionExecutor {
 
     override fun capabilities(): ExecutorCapabilities = capability
 
-    override fun execute(vdDisplayId: Int, action: GuiAction): ActionExecutionResult {
+    override fun execute(request: ActionExecutionRequest): ActionExecutionResult {
+        val vdDisplayId = request.vdDisplayId
+        val action = request.action
         if (!capability.supported) {
             return ActionExecutionResult(
                 ok = false,

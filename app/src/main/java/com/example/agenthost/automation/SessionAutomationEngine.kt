@@ -476,7 +476,13 @@ class SessionAutomationEngine(
                 )
             }
 
-            val result = actionExecutor.execute(snapshot.vdDisplayId, action)
+            val result = actionExecutor.execute(
+                ActionExecutionRequest(
+                    sessionId = snapshot.sessionId,
+                    vdDisplayId = snapshot.vdDisplayId,
+                    action = action
+                )
+            )
             if (result.ok) {
                 return result
             }
@@ -494,7 +500,10 @@ class SessionAutomationEngine(
             )
 
             if (result.code == "EXECUTOR_UNSUPPORTED" ||
-                result.code == "EXECUTOR_ACTION_UNSUPPORTED"
+                result.code == "EXECUTOR_ACTION_UNSUPPORTED" ||
+                result.code == "UNSUPPORTED" ||
+                result.code == "PERMISSION_DENIED" ||
+                result.code == "DISPLAY_NOT_FOUND"
             ) {
                 break
             }

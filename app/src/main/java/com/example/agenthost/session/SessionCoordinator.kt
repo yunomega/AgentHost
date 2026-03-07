@@ -8,13 +8,15 @@ import com.example.agenthost.automation.AutomationHistory
 import com.example.agenthost.automation.AutomationSessionSnapshot
 import com.example.agenthost.automation.AutomationStateCallbacks
 import com.example.agenthost.automation.DisplayActionExecutor
+import com.example.agenthost.automation.ObservationProvider
 import com.example.agenthost.automation.PlanningAdapter
+import com.example.agenthost.automation.PlatformDisplayActionExecutor
+import com.example.agenthost.automation.PlatformObservationProvider
 import com.example.agenthost.automation.ScriptedStepPlanningAdapter
 import com.example.agenthost.automation.SessionAutomationEngine
-import com.example.agenthost.automation.ShellDisplayActionExecutor
-import com.example.agenthost.automation.VdObservationProvider
 import com.example.agenthost.debug.SessionAuditHooks
 import com.example.agenthost.migration.TaskMigrationController
+import com.example.agenthost.platform.AgentHostPlatformClient
 import com.example.agenthost.runtime.VirtualDisplayRuntime
 import java.util.UUID
 
@@ -35,7 +37,9 @@ class SessionCoordinator(
 
     private val automationHistory = AutomationHistory()
     private val planningAdapter: PlanningAdapter = ScriptedStepPlanningAdapter(automationHistory)
-    private val actionExecutor: DisplayActionExecutor = ShellDisplayActionExecutor()
+    private val platformGateway = AgentHostPlatformClient(appContext)
+    private val observationProvider: ObservationProvider = PlatformObservationProvider(platformGateway)
+    private val actionExecutor: DisplayActionExecutor = PlatformDisplayActionExecutor(platformGateway)
     private val automationEngine: SessionAutomationEngine = SessionAutomationEngine(
         callbacks = object : AutomationStateCallbacks {
             override fun getSnapshot(sessionId: String): AutomationSessionSnapshot? {
@@ -133,7 +137,7 @@ class SessionCoordinator(
                 }
             }
         },
-        observationProvider = VdObservationProvider(),
+        observationProvider = observationProvider,
         planningAdapter = planningAdapter,
         actionExecutor = actionExecutor,
         history = automationHistory

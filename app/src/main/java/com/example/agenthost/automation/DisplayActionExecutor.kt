@@ -13,8 +13,14 @@ data class ActionExecutionResult(
     val details: String
 )
 
+data class ActionExecutionRequest(
+    val sessionId: String,
+    val vdDisplayId: Int,
+    val action: GuiAction
+)
+
 interface DisplayActionExecutor {
     fun capabilities(): ExecutorCapabilities
 
-    fun execute(vdDisplayId: Int, action: GuiAction): ActionExecutionResult
+    fun execute(request: ActionExecutionRequest): ActionExecutionResult
 }
