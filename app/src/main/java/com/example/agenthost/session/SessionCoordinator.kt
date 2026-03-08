@@ -10,10 +10,11 @@ import com.example.agenthost.automation.AutomationStateCallbacks
 import com.example.agenthost.automation.DisplayActionExecutor
 import com.example.agenthost.automation.ObservationProvider
 import com.example.agenthost.automation.PlanningAdapter
+import com.example.agenthost.automation.PlannerSelector
 import com.example.agenthost.automation.PlatformDisplayActionExecutor
 import com.example.agenthost.automation.PlatformObservationProvider
-import com.example.agenthost.automation.ScriptedStepPlanningAdapter
 import com.example.agenthost.automation.SessionAutomationEngine
+import com.example.agenthost.config.PlannerConfig
 import com.example.agenthost.debug.SessionAuditHooks
 import com.example.agenthost.migration.TaskMigrationController
 import com.example.agenthost.platform.AgentHostPlatformClient
@@ -36,7 +37,10 @@ class SessionCoordinator(
     private var activeRuntime: VirtualDisplayRuntime.RuntimeHandle? = null
 
     private val automationHistory = AutomationHistory()
-    private val planningAdapter: PlanningAdapter = ScriptedStepPlanningAdapter(automationHistory)
+    private var activePlannerConfig: PlannerConfig = PlannerConfig()
+    private val planningAdapter: PlanningAdapter = PlannerSelector(automationHistory) {
+        synchronized(lock) { activePlannerConfig }
+    }
     private val platformGateway = AgentHostPlatformClient(appContext)
     private val observationProvider: ObservationProvider = PlatformObservationProvider(platformGateway)
     private val actionExecutor: DisplayActionExecutor = PlatformDisplayActionExecutor(platformGateway)
@@ -194,6 +198,7 @@ class SessionCoordinator(
         )
 
         val debugStartInjection = SessionAuditHooks.consumeStartInjection()
+        activePlannerConfig = debugStartInjection.plannerConfigOverride ?: PlannerConfig()
         val intent = Intent(appContext, SessionRootActivity::class.java).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             putExtra(SessionRootActivity.EXTRA_SESSION_ID, sessionId)
@@ -567,6 +572,7 @@ class SessionCoordinator(
             SessionBridge.clear(it)
             automationEngine.clearSession(it)
         }
+        activePlannerConfig = PlannerConfig()
         activeRuntime?.release()
         activeRuntime = null
         activeSession = null
@@ -605,6 +611,7 @@ class SessionCoordinator(
             "lastError" to state.lastError,
             "waitingQuestion" to state.waitingQuestion,
             "automationStep" to state.automationStep,
+            "plannerMode" to activePlannerConfig.mode.name,
             "actionType" to "NONE"
         )
     }

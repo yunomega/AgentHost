@@ -1,6 +1,6 @@
 package com.example.agenthost.automation
 
-import android.util.Log
+import com.example.agenthost.core.AgentHostLog
 import com.example.agenthost.runtime.VirtualDisplayRuntime
 import com.example.agenthost.session.SessionStatus
 import java.util.concurrent.ConcurrentHashMap
@@ -222,6 +222,10 @@ class SessionAutomationEngine(
                     sessionId = snapshot.sessionId,
                     command = snapshot.command,
                     step = step,
+                    vdDisplayId = snapshot.vdDisplayId,
+                    sessionTaskId = snapshot.sessionTaskId,
+                    planningMode = planningAdapter.modeForSession(snapshot.sessionId),
+                    capabilityProfile = CapabilityProfile.phase3PlatformReady(capabilities.supported),
                     observation = observation,
                     recentActions = history.recentActions(snapshot.sessionId),
                     lastFailureCode = history.lastFailureCode(snapshot.sessionId),
@@ -232,6 +236,12 @@ class SessionAutomationEngine(
             when (planResult) {
                 is PlanResult.PlanFailure -> {
                     history.setLastFailureCode(sessionId, planResult.code)
+                    val failureExtras = buildString {
+                        append("message=${planResult.message}")
+                        planResult.rawResponseSnippet?.let {
+                            append(" rawSnippet=$it")
+                        }
+                    }
                     log(
                         event = "planner_result",
                         sessionId = snapshot.sessionId,
@@ -240,7 +250,7 @@ class SessionAutomationEngine(
                         step = step,
                         actionType = "NONE",
                         code = planResult.code,
-                        extras = "message=${planResult.message}"
+                        extras = failureExtras
                     )
                     log(
                         event = "session_failed",
@@ -250,7 +260,7 @@ class SessionAutomationEngine(
                         step = step,
                         actionType = "NONE",
                         code = planResult.code,
-                        extras = "message=${planResult.message}"
+                        extras = failureExtras
                     )
                     callbacks.onSessionFailed(
                         sessionId = snapshot.sessionId,
@@ -541,10 +551,14 @@ class SessionAutomationEngine(
         code: String,
         extras: String = "{}"
     ) {
-        Log.i(
+        val plannerMode = runCatching {
+            planningAdapter.modeForSession(sessionId).name
+        }.getOrDefault("UNKNOWN")
+        AgentHostLog.i(
             TAG,
             "event=$event sessionId=$sessionId vdDisplayId=$vdDisplayId " +
-                "sessionTaskId=$sessionTaskId step=$step actionType=$actionType code=$code extras=$extras"
+                "sessionTaskId=$sessionTaskId step=$step plannerMode=$plannerMode " +
+                "actionType=$actionType code=$code extras=$extras"
         )
     }
 }

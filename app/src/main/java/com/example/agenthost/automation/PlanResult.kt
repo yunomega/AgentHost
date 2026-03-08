@@ -5,6 +5,7 @@ sealed class PlanResult {
 
     data class PlanFailure(
         val code: String,
-        val message: String
+        val message: String,
+        val rawResponseSnippet: String? = null
     ) : PlanResult()
 }

@@ -11,6 +11,8 @@ class ScriptedStepPlanningAdapter(
 
     private val plans = ConcurrentHashMap<String, Result<ScriptPlan>>()
 
+    override fun modeForSession(sessionId: String): PlanningMode = PlanningMode.SCRIPTED
+
     override fun planNext(request: PlanningRequest): PlanResult {
         val planResult = plans.computeIfAbsent(request.sessionId) {
             parsePlan(request.command)
