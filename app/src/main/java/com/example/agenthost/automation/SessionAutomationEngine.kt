@@ -180,6 +180,10 @@ class SessionAutomationEngine(
                 code = "STEP_BEGIN"
             )
 
+            if (shouldAbortStep(control, snapshot, step, actionType = "NONE")) {
+                return
+            }
+
             val observation = observationProvider.capture(
                 ObservationRequest(
                     sessionId = snapshot.sessionId,
@@ -188,6 +192,10 @@ class SessionAutomationEngine(
                     imageReader = snapshot.runtimeHandle?.imageReader
                 )
             )
+
+            if (shouldAbortStep(control, snapshot, step, actionType = "NONE")) {
+                return
+            }
 
             when (observation) {
                 is ObservationResult.Captured -> {
@@ -217,6 +225,10 @@ class SessionAutomationEngine(
                 }
             }
 
+            if (shouldAbortStep(control, snapshot, step, actionType = "NONE")) {
+                return
+            }
+
             val planResult = planningAdapter.planNext(
                 request = PlanningRequest(
                     sessionId = snapshot.sessionId,
@@ -232,6 +244,10 @@ class SessionAutomationEngine(
                     lastUserReply = history.lastUserReply(snapshot.sessionId)
                 )
             )
+
+            if (shouldAbortStep(control, snapshot, step, actionType = "NONE")) {
+                return
+            }
 
             when (planResult) {
                 is PlanResult.PlanFailure -> {
@@ -461,6 +477,43 @@ class SessionAutomationEngine(
             code = "AUTOMATION_MAX_STEPS_EXCEEDED",
             extras = "maxSteps=$maxSteps"
         )
+    }
+
+    private fun shouldAbortStep(
+        control: LoopControl,
+        snapshot: AutomationSessionSnapshot,
+        step: Int,
+        actionType: String
+    ): Boolean {
+        if (control.stopRequested.get()) {
+            log(
+                event = "automation_stopped",
+                sessionId = snapshot.sessionId,
+                vdDisplayId = snapshot.vdDisplayId,
+                sessionTaskId = snapshot.sessionTaskId,
+                step = step,
+                actionType = actionType,
+                code = "STOP_REQUESTED"
+            )
+            return true
+        }
+
+        val currentSnapshot = callbacks.getSnapshot(snapshot.sessionId) ?: return false
+        if (currentSnapshot.status == SessionStatus.RUNNING) {
+            return false
+        }
+
+        log(
+            event = "automation_stopped",
+            sessionId = currentSnapshot.sessionId,
+            vdDisplayId = currentSnapshot.vdDisplayId,
+            sessionTaskId = currentSnapshot.sessionTaskId,
+            step = step,
+            actionType = actionType,
+            code = "SESSION_NOT_RUNNING",
+            extras = "status=${currentSnapshot.status.name}"
+        )
+        return true
     }
 
     private fun executeWithRetry(

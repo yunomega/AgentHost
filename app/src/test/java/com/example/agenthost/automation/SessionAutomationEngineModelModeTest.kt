@@ -6,10 +6,12 @@ import com.example.agenthost.model.ModelResponse
 import com.example.agenthost.session.SessionStatus
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 class SessionAutomationEngineModelModeTest {
     @Test
@@ -84,6 +86,60 @@ class SessionAutomationEngineModelModeTest {
         val restart = engine.startAutomation("s2")
         assertTrue(restart.ok)
         engine.stopAutomation("s2")
+    }
+
+    @Test
+    fun clearSessionDuringCaptureStopsBeforePlanningNextStep() {
+        val history = AutomationHistory()
+        val callbacks = TestCallbacks(sessionId = "s3", command = "tap the center once")
+        val captureStarted = CountDownLatch(1)
+        val releaseCapture = CountDownLatch(1)
+        val planCalls = AtomicInteger(0)
+        val planner = object : PlanningAdapter {
+            override fun modeForSession(sessionId: String): PlanningMode = PlanningMode.MODEL
+
+            override fun planNext(request: PlanningRequest): PlanResult {
+                planCalls.incrementAndGet()
+                return PlanResult.PlanFailure(
+                    code = "PLAN_SHOULD_NOT_RUN",
+                    message = "planner invoked after clearSession"
+                )
+            }
+
+            override fun clearSession(sessionId: String) = Unit
+        }
+        val observationProvider = object : ObservationProvider {
+            override fun capture(request: ObservationRequest): ObservationResult {
+                captureStarted.countDown()
+                releaseCapture.await(2, TimeUnit.SECONDS)
+                return ObservationResult.Captured(
+                    base64Png = "",
+                    width = 1080,
+                    height = 1920
+                )
+            }
+        }
+        val engine = SessionAutomationEngine(
+            callbacks = callbacks,
+            observationProvider = observationProvider,
+            planningAdapter = planner,
+            actionExecutor = FakeExecutor(),
+            history = history,
+            maxSteps = 5,
+            maxActionRetries = 0
+        )
+
+        assertTrue(engine.startAutomation("s3").ok)
+        assertTrue(captureStarted.await(2, TimeUnit.SECONDS))
+
+        engine.clearSession("s3")
+        releaseCapture.countDown()
+
+        Thread.sleep(300)
+        assertEquals(0, planCalls.get())
+        assertFalse(callbacks.completedLatch.await(100, TimeUnit.MILLISECONDS))
+        assertFalse(callbacks.failedLatch.await(100, TimeUnit.MILLISECONDS))
+        assertNull(callbacks.waitingQuestion)
     }
 
     private class TestCallbacks(
