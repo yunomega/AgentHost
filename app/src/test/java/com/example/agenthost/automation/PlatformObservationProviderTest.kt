@@ -58,7 +58,7 @@ class PlatformObservationProviderTest {
         val result = provider.capture(
             ObservationRequest(
                 sessionId = "s1",
-                vdDisplayId = 7,
+                executionDisplayId = 7,
                 sessionTaskId = 9,
                 imageReader = null
             )
@@ -117,7 +117,7 @@ class PlatformObservationProviderTest {
         val result = provider.capture(
             ObservationRequest(
                 sessionId = "s1",
-                vdDisplayId = 7,
+                executionDisplayId = 7,
                 sessionTaskId = 9,
                 imageReader = null
             )
@@ -178,7 +178,7 @@ class PlatformObservationProviderTest {
         val result = provider.capture(
             ObservationRequest(
                 sessionId = "s1",
-                vdDisplayId = 7,
+                executionDisplayId = 7,
                 sessionTaskId = 9,
                 imageReader = null
             )

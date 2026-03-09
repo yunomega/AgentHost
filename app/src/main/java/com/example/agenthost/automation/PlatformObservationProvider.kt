@@ -14,7 +14,7 @@ class PlatformObservationProvider(
     init {
         AgentHostLog.i(
             TAG,
-            "event=observation_provider_selected sessionId=null vdDisplayId=-1 " +
+            "event=observation_provider_selected sessionId=null executionDisplayId=-1 " +
                 "sessionTaskId=-1 step=0 actionType=NONE code=PLATFORM_PROVIDER extras=service=agenthost_platform"
         )
     }
@@ -22,7 +22,7 @@ class PlatformObservationProvider(
     override fun capture(request: ObservationRequest): ObservationResult {
         val response = gateway.captureDisplay(
             sessionId = request.sessionId,
-            displayId = request.vdDisplayId
+            displayId = request.executionDisplayId
         )
         if (!response.ok) {
             return ObservationResult.Failed(

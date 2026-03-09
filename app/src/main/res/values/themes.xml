@@ -2,4 +2,12 @@
 <resources>
 
     <style name="Theme.AgentHost" parent="android:Theme.Material.Light.NoActionBar" />
+
+    <style name="Theme.AgentHost.SessionRoot.Transparent" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:colorBackgroundCacheHint">@null</item>
+        <item name="android:backgroundDimEnabled">false</item>
+        <item name="android:windowDisablePreview">true</item>
+    </style>
 </resources>

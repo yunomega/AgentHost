@@ -49,7 +49,7 @@ class PlannerSelector(
         }
         AgentHostLog.i(
             TAG,
-            "event=planner_mode_selected sessionId=${request.sessionId} vdDisplayId=${request.vdDisplayId} " +
+            "event=planner_mode_selected sessionId=${request.sessionId} executionDisplayId=${request.executionDisplayId} " +
                 "sessionTaskId=${request.sessionTaskId} step=${request.step} plannerMode=${mode.name} " +
                 "actionType=NONE code=PLANNER_MODE_SELECTED details=${plannerConfig.modelConfig.sanitizedSummary()}"
         )

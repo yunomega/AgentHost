@@ -14,7 +14,7 @@ class PlatformDisplayActionExecutor(
     init {
         AgentHostLog.i(
             TAG,
-            "event=display_executor_selected sessionId=null vdDisplayId=-1 " +
+            "event=display_executor_selected sessionId=null executionDisplayId=-1 " +
                 "sessionTaskId=-1 step=0 actionType=NONE code=PLATFORM_EXECUTOR extras=service=agenthost_platform"
         )
     }
@@ -39,10 +39,10 @@ class PlatformDisplayActionExecutor(
 
     override fun execute(request: ActionExecutionRequest): ActionExecutionResult {
         val response = when (val action = request.action) {
-            is GuiAction.Click -> gateway.injectTap(request.sessionId, request.vdDisplayId, action.x, action.y)
+            is GuiAction.Click -> gateway.injectTap(request.sessionId, request.executionDisplayId, action.x, action.y)
             is GuiAction.Swipe -> gateway.injectSwipe(
                 request.sessionId,
-                request.vdDisplayId,
+                request.executionDisplayId,
                 action.x1,
                 action.y1,
                 action.x2,
@@ -52,15 +52,15 @@ class PlatformDisplayActionExecutor(
 
             is GuiAction.LongPress -> gateway.injectLongPress(
                 request.sessionId,
-                request.vdDisplayId,
+                request.executionDisplayId,
                 action.x,
                 action.y,
                 action.durationMs
             )
 
-            is GuiAction.TypeText -> gateway.injectText(request.sessionId, request.vdDisplayId, action.text)
-            GuiAction.Back -> gateway.injectKey(request.sessionId, request.vdDisplayId, KeyEvent.KEYCODE_BACK)
-            GuiAction.Home -> gateway.injectKey(request.sessionId, request.vdDisplayId, KeyEvent.KEYCODE_HOME)
+            is GuiAction.TypeText -> gateway.injectText(request.sessionId, request.executionDisplayId, action.text)
+            GuiAction.Back -> gateway.injectKey(request.sessionId, request.executionDisplayId, KeyEvent.KEYCODE_BACK)
+            GuiAction.Home -> gateway.injectKey(request.sessionId, request.executionDisplayId, KeyEvent.KEYCODE_HOME)
             is GuiAction.Wait,
             is GuiAction.AskUser,
             is GuiAction.Done -> return ActionExecutionResult(

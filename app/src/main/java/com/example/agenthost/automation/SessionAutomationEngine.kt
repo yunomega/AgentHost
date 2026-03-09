@@ -22,7 +22,9 @@ data class EngineResult(
 data class AutomationSessionSnapshot(
     val sessionId: String,
     val command: String,
-    val vdDisplayId: Int,
+    val executionDisplayId: Int,
+    val virtualDisplayId: Int?,
+    val surfaceDisplayId: Int?,
     val sessionTaskId: Int,
     val status: SessionStatus,
     val runtimeHandle: VirtualDisplayRuntime.RuntimeHandle?
@@ -51,7 +53,7 @@ class SessionAutomationEngine(
         private const val TAG = "SessionAutomationEngine"
     }
 
-    private val worker = Executors.newSingleThreadExecutor()
+    private val worker = Executors.newCachedThreadPool()
     private val loops = ConcurrentHashMap<String, LoopControl>()
 
     fun startAutomation(sessionId: String): EngineResult {
@@ -102,12 +104,16 @@ class SessionAutomationEngine(
 
     private fun runLoop(sessionId: String, control: LoopControl) {
         val bootstrapSnapshot = callbacks.getSnapshot(sessionId)
-        val bootstrapDisplayId = bootstrapSnapshot?.vdDisplayId ?: -1
+        val bootstrapExecutionDisplayId = bootstrapSnapshot?.executionDisplayId ?: -1
+        val bootstrapVirtualDisplayId = bootstrapSnapshot?.virtualDisplayId
+        val bootstrapSurfaceDisplayId = bootstrapSnapshot?.surfaceDisplayId
         val bootstrapTaskId = bootstrapSnapshot?.sessionTaskId ?: -1
         log(
             event = "automation_start",
             sessionId = sessionId,
-            vdDisplayId = bootstrapDisplayId,
+            executionDisplayId = bootstrapExecutionDisplayId,
+            virtualDisplayId = bootstrapVirtualDisplayId,
+            surfaceDisplayId = bootstrapSurfaceDisplayId,
             sessionTaskId = bootstrapTaskId,
             step = 0,
             actionType = "NONE",
@@ -118,7 +124,9 @@ class SessionAutomationEngine(
         log(
             event = "executor_probe",
             sessionId = sessionId,
-            vdDisplayId = bootstrapDisplayId,
+            executionDisplayId = bootstrapExecutionDisplayId,
+            virtualDisplayId = bootstrapVirtualDisplayId,
+            surfaceDisplayId = bootstrapSurfaceDisplayId,
             sessionTaskId = bootstrapTaskId,
             step = 0,
             actionType = "NONE",
@@ -132,7 +140,9 @@ class SessionAutomationEngine(
                 log(
                     event = "automation_stopped",
                     sessionId = sessionId,
-                    vdDisplayId = bootstrapDisplayId,
+                    executionDisplayId = bootstrapExecutionDisplayId,
+                    virtualDisplayId = bootstrapVirtualDisplayId,
+                    surfaceDisplayId = bootstrapSurfaceDisplayId,
                     sessionTaskId = bootstrapTaskId,
                     step = loopCount,
                     actionType = "NONE",
@@ -145,7 +155,9 @@ class SessionAutomationEngine(
                 log(
                     event = "automation_stopped",
                     sessionId = sessionId,
-                    vdDisplayId = -1,
+                    executionDisplayId = -1,
+                    virtualDisplayId = null,
+                    surfaceDisplayId = null,
                     sessionTaskId = -1,
                     step = loopCount,
                     actionType = "NONE",
@@ -158,7 +170,9 @@ class SessionAutomationEngine(
                 log(
                     event = "automation_stopped",
                     sessionId = snapshot.sessionId,
-                    vdDisplayId = snapshot.vdDisplayId,
+                    executionDisplayId = snapshot.executionDisplayId,
+                    virtualDisplayId = snapshot.virtualDisplayId,
+                    surfaceDisplayId = snapshot.surfaceDisplayId,
                     sessionTaskId = snapshot.sessionTaskId,
                     step = loopCount,
                     actionType = "NONE",
@@ -173,7 +187,9 @@ class SessionAutomationEngine(
             log(
                 event = "automation_step_begin",
                 sessionId = snapshot.sessionId,
-                vdDisplayId = snapshot.vdDisplayId,
+                executionDisplayId = snapshot.executionDisplayId,
+                virtualDisplayId = snapshot.virtualDisplayId,
+                surfaceDisplayId = snapshot.surfaceDisplayId,
                 sessionTaskId = snapshot.sessionTaskId,
                 step = step,
                 actionType = "NONE",
@@ -187,7 +203,7 @@ class SessionAutomationEngine(
             val observation = observationProvider.capture(
                 ObservationRequest(
                     sessionId = snapshot.sessionId,
-                    vdDisplayId = snapshot.vdDisplayId,
+                    executionDisplayId = snapshot.executionDisplayId,
                     sessionTaskId = snapshot.sessionTaskId,
                     imageReader = snapshot.runtimeHandle?.imageReader
                 )
@@ -202,7 +218,9 @@ class SessionAutomationEngine(
                     log(
                         event = "observation_captured",
                         sessionId = snapshot.sessionId,
-                        vdDisplayId = snapshot.vdDisplayId,
+                        executionDisplayId = snapshot.executionDisplayId,
+                        virtualDisplayId = snapshot.virtualDisplayId,
+                        surfaceDisplayId = snapshot.surfaceDisplayId,
                         sessionTaskId = snapshot.sessionTaskId,
                         step = step,
                         actionType = "NONE",
@@ -215,7 +233,9 @@ class SessionAutomationEngine(
                     log(
                         event = "observation_captured",
                         sessionId = snapshot.sessionId,
-                        vdDisplayId = snapshot.vdDisplayId,
+                        executionDisplayId = snapshot.executionDisplayId,
+                        virtualDisplayId = snapshot.virtualDisplayId,
+                        surfaceDisplayId = snapshot.surfaceDisplayId,
                         sessionTaskId = snapshot.sessionTaskId,
                         step = step,
                         actionType = "NONE",
@@ -234,7 +254,7 @@ class SessionAutomationEngine(
                     sessionId = snapshot.sessionId,
                     command = snapshot.command,
                     step = step,
-                    vdDisplayId = snapshot.vdDisplayId,
+                    executionDisplayId = snapshot.executionDisplayId,
                     sessionTaskId = snapshot.sessionTaskId,
                     planningMode = planningAdapter.modeForSession(snapshot.sessionId),
                     capabilityProfile = CapabilityProfile.phase3PlatformReady(capabilities.supported),
@@ -261,7 +281,9 @@ class SessionAutomationEngine(
                     log(
                         event = "planner_result",
                         sessionId = snapshot.sessionId,
-                        vdDisplayId = snapshot.vdDisplayId,
+                        executionDisplayId = snapshot.executionDisplayId,
+                        virtualDisplayId = snapshot.virtualDisplayId,
+                        surfaceDisplayId = snapshot.surfaceDisplayId,
                         sessionTaskId = snapshot.sessionTaskId,
                         step = step,
                         actionType = "NONE",
@@ -271,7 +293,9 @@ class SessionAutomationEngine(
                     log(
                         event = "session_failed",
                         sessionId = snapshot.sessionId,
-                        vdDisplayId = snapshot.vdDisplayId,
+                        executionDisplayId = snapshot.executionDisplayId,
+                        virtualDisplayId = snapshot.virtualDisplayId,
+                        surfaceDisplayId = snapshot.surfaceDisplayId,
                         sessionTaskId = snapshot.sessionTaskId,
                         step = step,
                         actionType = "NONE",
@@ -293,7 +317,9 @@ class SessionAutomationEngine(
                     log(
                         event = "planner_result",
                         sessionId = snapshot.sessionId,
-                        vdDisplayId = snapshot.vdDisplayId,
+                        executionDisplayId = snapshot.executionDisplayId,
+                        virtualDisplayId = snapshot.virtualDisplayId,
+                        surfaceDisplayId = snapshot.surfaceDisplayId,
                         sessionTaskId = snapshot.sessionTaskId,
                         step = step,
                         actionType = actionType,
@@ -302,7 +328,9 @@ class SessionAutomationEngine(
                     log(
                         event = "action_parsed",
                         sessionId = snapshot.sessionId,
-                        vdDisplayId = snapshot.vdDisplayId,
+                        executionDisplayId = snapshot.executionDisplayId,
+                        virtualDisplayId = snapshot.virtualDisplayId,
+                        surfaceDisplayId = snapshot.surfaceDisplayId,
                         sessionTaskId = snapshot.sessionTaskId,
                         step = step,
                         actionType = actionType,
@@ -322,7 +350,9 @@ class SessionAutomationEngine(
                             log(
                                 event = "session_completed",
                                 sessionId = snapshot.sessionId,
-                                vdDisplayId = snapshot.vdDisplayId,
+                                executionDisplayId = snapshot.executionDisplayId,
+                                virtualDisplayId = snapshot.virtualDisplayId,
+                                surfaceDisplayId = snapshot.surfaceDisplayId,
                                 sessionTaskId = snapshot.sessionTaskId,
                                 step = step,
                                 actionType = actionType,
@@ -349,7 +379,9 @@ class SessionAutomationEngine(
                             log(
                                 event = "session_waiting_user",
                                 sessionId = snapshot.sessionId,
-                                vdDisplayId = snapshot.vdDisplayId,
+                                executionDisplayId = snapshot.executionDisplayId,
+                                virtualDisplayId = snapshot.virtualDisplayId,
+                                surfaceDisplayId = snapshot.surfaceDisplayId,
                                 sessionTaskId = snapshot.sessionTaskId,
                                 step = step,
                                 actionType = actionType,
@@ -377,7 +409,9 @@ class SessionAutomationEngine(
                                 log(
                                     event = "automation_stopped",
                                     sessionId = snapshot.sessionId,
-                                    vdDisplayId = snapshot.vdDisplayId,
+                                    executionDisplayId = snapshot.executionDisplayId,
+                                    virtualDisplayId = snapshot.virtualDisplayId,
+                                    surfaceDisplayId = snapshot.surfaceDisplayId,
                                     sessionTaskId = snapshot.sessionTaskId,
                                     step = step,
                                     actionType = actionType,
@@ -388,7 +422,9 @@ class SessionAutomationEngine(
                             log(
                                 event = "action_executed",
                                 sessionId = snapshot.sessionId,
-                                vdDisplayId = snapshot.vdDisplayId,
+                                executionDisplayId = snapshot.executionDisplayId,
+                                virtualDisplayId = snapshot.virtualDisplayId,
+                                surfaceDisplayId = snapshot.surfaceDisplayId,
                                 sessionTaskId = snapshot.sessionTaskId,
                                 step = step,
                                 actionType = actionType,
@@ -409,7 +445,9 @@ class SessionAutomationEngine(
                                     log(
                                         event = "automation_stopped",
                                         sessionId = snapshot.sessionId,
-                                        vdDisplayId = snapshot.vdDisplayId,
+                                        executionDisplayId = snapshot.executionDisplayId,
+                                        virtualDisplayId = snapshot.virtualDisplayId,
+                                        surfaceDisplayId = snapshot.surfaceDisplayId,
                                         sessionTaskId = snapshot.sessionTaskId,
                                         step = step,
                                         actionType = actionType,
@@ -427,7 +465,9 @@ class SessionAutomationEngine(
                                 log(
                                     event = "session_failed",
                                     sessionId = snapshot.sessionId,
-                                    vdDisplayId = snapshot.vdDisplayId,
+                                    executionDisplayId = snapshot.executionDisplayId,
+                                    virtualDisplayId = snapshot.virtualDisplayId,
+                                    surfaceDisplayId = snapshot.surfaceDisplayId,
                                     sessionTaskId = snapshot.sessionTaskId,
                                     step = step,
                                     actionType = actionType,
@@ -447,7 +487,9 @@ class SessionAutomationEngine(
                             log(
                                 event = "action_executed",
                                 sessionId = snapshot.sessionId,
-                                vdDisplayId = snapshot.vdDisplayId,
+                                executionDisplayId = snapshot.executionDisplayId,
+                                virtualDisplayId = snapshot.virtualDisplayId,
+                                surfaceDisplayId = snapshot.surfaceDisplayId,
                                 sessionTaskId = snapshot.sessionTaskId,
                                 step = step,
                                 actionType = actionType,
@@ -470,7 +512,9 @@ class SessionAutomationEngine(
         log(
             event = "session_failed",
             sessionId = snapshot?.sessionId ?: sessionId,
-            vdDisplayId = snapshot?.vdDisplayId ?: -1,
+            executionDisplayId = snapshot?.executionDisplayId ?: -1,
+            virtualDisplayId = snapshot?.virtualDisplayId,
+            surfaceDisplayId = snapshot?.surfaceDisplayId,
             sessionTaskId = snapshot?.sessionTaskId ?: -1,
             step = maxSteps,
             actionType = "NONE",
@@ -489,7 +533,9 @@ class SessionAutomationEngine(
             log(
                 event = "automation_stopped",
                 sessionId = snapshot.sessionId,
-                vdDisplayId = snapshot.vdDisplayId,
+                executionDisplayId = snapshot.executionDisplayId,
+                virtualDisplayId = snapshot.virtualDisplayId,
+                surfaceDisplayId = snapshot.surfaceDisplayId,
                 sessionTaskId = snapshot.sessionTaskId,
                 step = step,
                 actionType = actionType,
@@ -506,7 +552,9 @@ class SessionAutomationEngine(
         log(
             event = "automation_stopped",
             sessionId = currentSnapshot.sessionId,
-            vdDisplayId = currentSnapshot.vdDisplayId,
+            executionDisplayId = currentSnapshot.executionDisplayId,
+            virtualDisplayId = currentSnapshot.virtualDisplayId,
+            surfaceDisplayId = currentSnapshot.surfaceDisplayId,
             sessionTaskId = currentSnapshot.sessionTaskId,
             step = step,
             actionType = actionType,
@@ -542,7 +590,7 @@ class SessionAutomationEngine(
             val result = actionExecutor.execute(
                 ActionExecutionRequest(
                     sessionId = snapshot.sessionId,
-                    vdDisplayId = snapshot.vdDisplayId,
+                    executionDisplayId = snapshot.executionDisplayId,
                     action = action
                 )
             )
@@ -554,7 +602,9 @@ class SessionAutomationEngine(
             log(
                 event = "action_failed",
                 sessionId = snapshot.sessionId,
-                vdDisplayId = snapshot.vdDisplayId,
+                executionDisplayId = snapshot.executionDisplayId,
+                virtualDisplayId = snapshot.virtualDisplayId,
+                surfaceDisplayId = snapshot.surfaceDisplayId,
                 sessionTaskId = snapshot.sessionTaskId,
                 step = step,
                 actionType = actionType,
@@ -597,7 +647,9 @@ class SessionAutomationEngine(
     private fun log(
         event: String,
         sessionId: String,
-        vdDisplayId: Int,
+        executionDisplayId: Int,
+        virtualDisplayId: Int?,
+        surfaceDisplayId: Int?,
         sessionTaskId: Int,
         step: Int,
         actionType: String,
@@ -609,9 +661,22 @@ class SessionAutomationEngine(
         }.getOrDefault("UNKNOWN")
         AgentHostLog.i(
             TAG,
-            "event=$event sessionId=$sessionId vdDisplayId=$vdDisplayId " +
-                "sessionTaskId=$sessionTaskId step=$step plannerMode=$plannerMode " +
-                "actionType=$actionType code=$code extras=$extras"
+            buildString {
+                append("event=").append(event)
+                append(" sessionId=").append(sessionId)
+                append(" executionDisplayId=").append(executionDisplayId)
+                append(" virtualDisplayId=").append(virtualDisplayId ?: "null")
+                append(" surfaceDisplayId=").append(surfaceDisplayId ?: "null")
+                append(" sessionTaskId=").append(sessionTaskId)
+                append(" step=").append(step)
+                append(" plannerMode=").append(plannerMode)
+                append(" actionType=").append(actionType)
+                append(" code=").append(code)
+                append(" extras=").append(extras)
+                if (virtualDisplayId != null) {
+                    append(" vdDisplayId=").append(virtualDisplayId)
+                }
+            }
         )
     }
 }

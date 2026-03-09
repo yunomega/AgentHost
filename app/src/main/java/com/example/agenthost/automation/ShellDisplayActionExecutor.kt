@@ -14,7 +14,7 @@ class ShellDisplayActionExecutor : DisplayActionExecutor {
     override fun capabilities(): ExecutorCapabilities = capability
 
     override fun execute(request: ActionExecutionRequest): ActionExecutionResult {
-        val vdDisplayId = request.vdDisplayId
+        val executionDisplayId = request.executionDisplayId
         val action = request.action
         if (!capability.supported) {
             return ActionExecutionResult(
@@ -27,10 +27,10 @@ class ShellDisplayActionExecutor : DisplayActionExecutor {
         val flag = capability.displayFlag ?: return ActionExecutionResult(
             ok = false,
             code = "EXECUTOR_UNSUPPORTED",
-            details = "display flag is missing"
+                details = "display flag is missing"
         )
 
-        val args = actionToCommandArgs(flag, vdDisplayId, action)
+        val args = actionToCommandArgs(flag, executionDisplayId, action)
             ?: return ActionExecutionResult(
                 ok = false,
                 code = "EXECUTOR_ACTION_UNSUPPORTED",
@@ -70,8 +70,8 @@ class ShellDisplayActionExecutor : DisplayActionExecutor {
         }
     }
 
-    private fun actionToCommandArgs(flag: String, vdDisplayId: Int, action: GuiAction): List<String>? {
-        val display = vdDisplayId.toString()
+    private fun actionToCommandArgs(flag: String, executionDisplayId: Int, action: GuiAction): List<String>? {
+        val display = executionDisplayId.toString()
         return when (action) {
             is GuiAction.Click -> listOf(
                 "input", flag, display,

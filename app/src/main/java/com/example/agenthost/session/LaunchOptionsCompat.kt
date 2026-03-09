@@ -6,23 +6,23 @@ import android.util.Log
 object LaunchOptionsCompat {
     private const val TAG = "LaunchOptionsCompat"
 
-    fun build(vdDisplayId: Int): ActivityOptions? {
+    fun build(displayId: Int): ActivityOptions? {
         val options = try {
             ActivityOptions.makeBasic()
         } catch (t: Throwable) {
-            Log.e(TAG, "makeBasic failed vdDisplayId=$vdDisplayId", t)
+            Log.e(TAG, "makeBasic failed displayId=$displayId", t)
             return null
         }
 
         try {
-            options.setLaunchDisplayId(vdDisplayId)
+            options.setLaunchDisplayId(displayId)
         } catch (t: Throwable) {
-            Log.e(TAG, "setLaunchDisplayId failed vdDisplayId=$vdDisplayId", t)
+            Log.e(TAG, "setLaunchDisplayId failed displayId=$displayId", t)
             return null
         }
 
         if (!setMovableTaskRequired(options, true)) {
-            Log.e(TAG, "setMovableTaskRequired unavailable or failed vdDisplayId=$vdDisplayId")
+            Log.e(TAG, "setMovableTaskRequired unavailable or failed displayId=$displayId")
             return null
         }
         return options

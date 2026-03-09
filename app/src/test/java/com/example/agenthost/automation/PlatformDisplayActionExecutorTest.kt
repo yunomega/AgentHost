@@ -28,7 +28,7 @@ class PlatformDisplayActionExecutorTest {
         val result = executor.execute(
             ActionExecutionRequest(
                 sessionId = "s1",
-                vdDisplayId = 23,
+                executionDisplayId = 23,
                 action = GuiAction.Click(10, 20)
             )
         )
@@ -51,7 +51,7 @@ class PlatformDisplayActionExecutorTest {
         val result = executor.execute(
             ActionExecutionRequest(
                 sessionId = "s1",
-                vdDisplayId = 23,
+                executionDisplayId = 23,
                 action = GuiAction.Click(10, 20)
             )
         )
@@ -70,7 +70,7 @@ class PlatformDisplayActionExecutorTest {
         val result = executor.execute(
             ActionExecutionRequest(
                 sessionId = "s1",
-                vdDisplayId = 23,
+                executionDisplayId = 23,
                 action = GuiAction.Wait(100)
             )
         )

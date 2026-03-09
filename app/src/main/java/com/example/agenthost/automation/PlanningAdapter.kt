@@ -4,7 +4,7 @@ data class PlanningRequest(
     val sessionId: String,
     val command: String,
     val step: Int,
-    val vdDisplayId: Int,
+    val executionDisplayId: Int,
     val sessionTaskId: Int,
     val planningMode: PlanningMode,
     val capabilityProfile: CapabilityProfile,

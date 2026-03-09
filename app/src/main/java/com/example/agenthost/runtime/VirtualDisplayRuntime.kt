@@ -29,7 +29,7 @@ class VirtualDisplayRuntime(
             virtualDisplay.release()
             Log.i(
                 "VirtualDisplayRuntime",
-                "release vdDisplayId=$vdDisplayId"
+                "release virtualDisplayId=$vdDisplayId"
             )
         }
     }
@@ -69,7 +69,7 @@ class VirtualDisplayRuntime(
         )
         Log.i(
             TAG,
-            "create success vdDisplayId=${handle.vdDisplayId} densityDpi=$densityDpi"
+            "create success virtualDisplayId=${handle.vdDisplayId} densityDpi=$densityDpi"
         )
         return handle
     }

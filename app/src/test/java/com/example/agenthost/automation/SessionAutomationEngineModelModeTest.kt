@@ -150,7 +150,9 @@ class SessionAutomationEngineModelModeTest {
         private var snapshot = AutomationSessionSnapshot(
             sessionId = sessionId,
             command = command,
-            vdDisplayId = 9,
+            executionDisplayId = 9,
+            virtualDisplayId = 9,
+            surfaceDisplayId = null,
             sessionTaskId = 21,
             status = SessionStatus.RUNNING,
             runtimeHandle = null

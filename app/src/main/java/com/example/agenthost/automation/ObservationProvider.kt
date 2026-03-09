@@ -17,7 +17,7 @@ sealed class ObservationResult {
 
 data class ObservationRequest(
     val sessionId: String,
-    val vdDisplayId: Int,
+    val executionDisplayId: Int,
     val sessionTaskId: Int,
     val imageReader: ImageReader?
 )

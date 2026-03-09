@@ -72,7 +72,7 @@ class ScriptedStepPlanningAdapterTest {
             sessionId = sessionId,
             command = command,
             step = step,
-            vdDisplayId = 7,
+            executionDisplayId = 7,
             sessionTaskId = 9,
             planningMode = PlanningMode.SCRIPTED,
             capabilityProfile = CapabilityProfile.phase3PlatformReady(true),

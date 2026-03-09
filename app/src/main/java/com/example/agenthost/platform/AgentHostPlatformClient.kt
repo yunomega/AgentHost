@@ -4,7 +4,14 @@ import android.content.Context
 import android.os.Bundle
 import android.os.IBinder
 import android.os.ParcelFileDescriptor
+import android.os.SystemClock
 import com.example.agenthost.core.AgentHostLog
+import java.util.concurrent.Callable
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.Future
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 
 interface PlatformAutomationGateway {
     fun isAvailable(): Boolean
@@ -70,7 +77,10 @@ private object PlatformBundleKeys {
 }
 
 class AgentHostPlatformClient(
-    private val context: Context
+    private val context: Context,
+    private val captureTimeoutMs: Long = 4_000L,
+    private val actionTimeoutMs: Long = 2_000L,
+    private val binderExecutor: ExecutorService = Executors.newCachedThreadPool()
 ) : PlatformAutomationGateway {
     companion object {
         private const val TAG = "AgentHostPlatformClient"
@@ -83,8 +93,30 @@ class AgentHostPlatformClient(
         logBegin(sessionId, displayId, "CAPTURE")
         val service = resolveService() ?: return unavailableCapture(sessionId, displayId, "CAPTURE")
         return try {
-            val result = service.captureDisplay(sessionId, displayId)
-            toCaptureResponse(sessionId, displayId, "CAPTURE", result)
+            val callStartedAt = SystemClock.elapsedRealtime()
+            val result = callWithTimeout(
+                sessionId = sessionId,
+                displayId = displayId,
+                actionType = "CAPTURE",
+                timeoutMs = captureTimeoutMs
+            ) {
+                service.captureDisplay(sessionId, displayId)
+            }
+            toCaptureResponse(
+                sessionId = sessionId,
+                displayId = displayId,
+                actionType = "CAPTURE",
+                result = result,
+                bundleWaitMs = SystemClock.elapsedRealtime() - callStartedAt
+            )
+        } catch (_: TimeoutException) {
+            failureCapture(
+                sessionId,
+                displayId,
+                "CAPTURE",
+                PlatformResultCodes.CAPTURE_FAILED,
+                "platform call timeout after ${captureTimeoutMs}ms"
+            )
         } catch (t: Throwable) {
             exceptionCapture(sessionId, displayId, "CAPTURE", t)
         }
@@ -99,7 +131,22 @@ class AgentHostPlatformClient(
         logBegin(sessionId, displayId, "TAP")
         val service = resolveService() ?: return unavailableAction(sessionId, displayId, "TAP")
         return try {
-            toActionResponse(sessionId, displayId, "TAP", service.injectTap(sessionId, displayId, x, y))
+            toActionResponse(
+                sessionId,
+                displayId,
+                "TAP",
+                callWithTimeout(sessionId, displayId, "TAP", actionTimeoutMs) {
+                    service.injectTap(sessionId, displayId, x, y)
+                }
+            )
+        } catch (_: TimeoutException) {
+            failureAction(
+                sessionId,
+                displayId,
+                "TAP",
+                PlatformResultCodes.INTERNAL_ERROR,
+                "platform call timeout after ${actionTimeoutMs}ms"
+            )
         } catch (t: Throwable) {
             exceptionAction(sessionId, displayId, "TAP", t)
         }
@@ -121,7 +168,17 @@ class AgentHostPlatformClient(
                 sessionId,
                 displayId,
                 "SWIPE",
-                service.injectSwipe(sessionId, displayId, x1, y1, x2, y2, durationMs)
+                callWithTimeout(sessionId, displayId, "SWIPE", actionTimeoutMs) {
+                    service.injectSwipe(sessionId, displayId, x1, y1, x2, y2, durationMs)
+                }
+            )
+        } catch (_: TimeoutException) {
+            failureAction(
+                sessionId,
+                displayId,
+                "SWIPE",
+                PlatformResultCodes.INTERNAL_ERROR,
+                "platform call timeout after ${actionTimeoutMs}ms"
             )
         } catch (t: Throwable) {
             exceptionAction(sessionId, displayId, "SWIPE", t)
@@ -136,7 +193,22 @@ class AgentHostPlatformClient(
         logBegin(sessionId, displayId, "KEY")
         val service = resolveService() ?: return unavailableAction(sessionId, displayId, "KEY")
         return try {
-            toActionResponse(sessionId, displayId, "KEY", service.injectKey(sessionId, displayId, keyCode))
+            toActionResponse(
+                sessionId,
+                displayId,
+                "KEY",
+                callWithTimeout(sessionId, displayId, "KEY", actionTimeoutMs) {
+                    service.injectKey(sessionId, displayId, keyCode)
+                }
+            )
+        } catch (_: TimeoutException) {
+            failureAction(
+                sessionId,
+                displayId,
+                "KEY",
+                PlatformResultCodes.INTERNAL_ERROR,
+                "platform call timeout after ${actionTimeoutMs}ms"
+            )
         } catch (t: Throwable) {
             exceptionAction(sessionId, displayId, "KEY", t)
         }
@@ -150,7 +222,22 @@ class AgentHostPlatformClient(
         logBegin(sessionId, displayId, "TEXT")
         val service = resolveService() ?: return unavailableAction(sessionId, displayId, "TEXT")
         return try {
-            toActionResponse(sessionId, displayId, "TEXT", service.injectText(sessionId, displayId, text))
+            toActionResponse(
+                sessionId,
+                displayId,
+                "TEXT",
+                callWithTimeout(sessionId, displayId, "TEXT", actionTimeoutMs) {
+                    service.injectText(sessionId, displayId, text)
+                }
+            )
+        } catch (_: TimeoutException) {
+            failureAction(
+                sessionId,
+                displayId,
+                "TEXT",
+                PlatformResultCodes.INTERNAL_ERROR,
+                "platform call timeout after ${actionTimeoutMs}ms"
+            )
         } catch (t: Throwable) {
             exceptionAction(sessionId, displayId, "TEXT", t)
         }
@@ -170,7 +257,17 @@ class AgentHostPlatformClient(
                 sessionId,
                 displayId,
                 "LONG_PRESS",
-                service.injectLongPress(sessionId, displayId, x, y, durationMs)
+                callWithTimeout(sessionId, displayId, "LONG_PRESS", actionTimeoutMs) {
+                    service.injectLongPress(sessionId, displayId, x, y, durationMs)
+                }
+            )
+        } catch (_: TimeoutException) {
+            failureAction(
+                sessionId,
+                displayId,
+                "LONG_PRESS",
+                PlatformResultCodes.INTERNAL_ERROR,
+                "platform call timeout after ${actionTimeoutMs}ms"
             )
         } catch (t: Throwable) {
             exceptionAction(sessionId, displayId, "LONG_PRESS", t)
@@ -186,7 +283,8 @@ class AgentHostPlatformClient(
         sessionId: String,
         displayId: Int,
         actionType: String,
-        result: Bundle?
+        result: Bundle?,
+        bundleWaitMs: Long
     ): PlatformCaptureResponse {
         if (result == null) {
             return failureCapture(sessionId, displayId, actionType, PlatformResultCodes.INTERNAL_ERROR, "null bundle")
@@ -197,13 +295,38 @@ class AgentHostPlatformClient(
         val height = result.getInt(PlatformBundleKeys.HEIGHT, 0)
         @Suppress("DEPRECATION")
         val pngFd = result.getParcelable(PlatformBundleKeys.PNG_FD) as? ParcelFileDescriptor
-        val pngBytes = readBytes(pngFd)
+        val pipeReadStartedAt = SystemClock.elapsedRealtime()
+        val pngBytes = try {
+            readBytes(pngFd)
+        } catch (t: Throwable) {
+            val detail = buildString {
+                append("failed reading png_fd after ")
+                append(SystemClock.elapsedRealtime() - pipeReadStartedAt)
+                append("ms: ")
+                append(t.message ?: t.javaClass.simpleName)
+            }
+            return failureCapture(
+                sessionId = sessionId,
+                displayId = displayId,
+                actionType = actionType,
+                code = PlatformResultCodes.INTERNAL_ERROR,
+                details = detail
+            )
+        }
+        val pipeReadMs = SystemClock.elapsedRealtime() - pipeReadStartedAt
         val ok = code == PlatformResultCodes.OK && pngBytes != null
         if (!ok) {
             val failureCode = if (code == PlatformResultCodes.OK) PlatformResultCodes.INTERNAL_ERROR else code
             val failureDetails = if (code == PlatformResultCodes.OK) "missing png_fd" else details
             return failureCapture(sessionId, displayId, actionType, failureCode, failureDetails)
         }
+        logSuccess(
+            sessionId = sessionId,
+            displayId = displayId,
+            actionType = actionType,
+            extras = "bundleWaitMs=$bundleWaitMs pipeReadMs=$pipeReadMs width=$width " +
+                "height=$height pngBytes=${pngBytes.size}"
+        )
         return PlatformCaptureResponse(
             ok = true,
             code = code,
@@ -307,10 +430,27 @@ class AgentHostPlatformClient(
         return ParcelFileDescriptor.AutoCloseInputStream(fd).use { input -> input.readBytes() }
     }
 
+    private fun <T> callWithTimeout(
+        sessionId: String,
+        displayId: Int,
+        actionType: String,
+        timeoutMs: Long,
+        block: () -> T
+    ): T {
+        val future: Future<T> = binderExecutor.submit(Callable { block() })
+        return try {
+            future.get(timeoutMs, TimeUnit.MILLISECONDS)
+        } catch (e: TimeoutException) {
+            future.cancel(true)
+            logTimeout(sessionId, displayId, actionType, timeoutMs)
+            throw e
+        }
+    }
+
     private fun logBegin(sessionId: String, displayId: Int, actionType: String) {
         AgentHostLog.i(
             TAG,
-            "event=platform_call_begin sessionId=$sessionId vdDisplayId=$displayId " +
+            "event=platform_call_begin sessionId=$sessionId executionDisplayId=$displayId " +
                 "sessionTaskId=-1 step=0 actionType=$actionType code=CALL_BEGIN extras={}"
         )
     }
@@ -322,12 +462,29 @@ class AgentHostPlatformClient(
         code: String,
         details: String
     ) {
-        val message = "event=platform_call_failed sessionId=$sessionId vdDisplayId=$displayId " +
+        val message = "event=platform_call_failed sessionId=$sessionId executionDisplayId=$displayId " +
             "sessionTaskId=-1 step=0 actionType=$actionType code=$code extras=details=$details"
         if (code == PlatformResultCodes.PERMISSION_DENIED || code == PlatformResultCodes.INTERNAL_ERROR) {
             AgentHostLog.e(TAG, message)
         } else {
             AgentHostLog.w(TAG, message)
         }
+    }
+
+    private fun logTimeout(sessionId: String, displayId: Int, actionType: String, timeoutMs: Long) {
+        AgentHostLog.e(
+            TAG,
+            "event=platform_call_timeout sessionId=$sessionId executionDisplayId=$displayId " +
+                "sessionTaskId=-1 step=0 actionType=$actionType code=CALL_TIMEOUT " +
+                "extras=timeoutMs=$timeoutMs"
+        )
+    }
+
+    private fun logSuccess(sessionId: String, displayId: Int, actionType: String, extras: String) {
+        AgentHostLog.i(
+            TAG,
+            "event=platform_call_success sessionId=$sessionId executionDisplayId=$displayId " +
+                "sessionTaskId=-1 step=0 actionType=$actionType code=CALL_OK extras=$extras"
+        )
     }
 }

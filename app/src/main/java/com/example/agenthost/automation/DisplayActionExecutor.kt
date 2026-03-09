@@ -15,7 +15,7 @@ data class ActionExecutionResult(
 
 data class ActionExecutionRequest(
     val sessionId: String,
-    val vdDisplayId: Int,
+    val executionDisplayId: Int,
     val action: GuiAction
 )
 

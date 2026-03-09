@@ -55,7 +55,7 @@ class HttpModelClient(
             AgentHostLog.w(
                 TAG,
                 "event=model_request_failed sessionId=${request.context.sessionId} " +
-                    "vdDisplayId=${request.context.vdDisplayId} sessionTaskId=${request.context.sessionTaskId} " +
+                    "executionDisplayId=${request.context.vdDisplayId} sessionTaskId=${request.context.sessionTaskId} " +
                     "step=${request.context.step} plannerMode=CLIENT actionType=NONE code=${lastFailure?.code} " +
                     "extras=attempt=$attempt totalAttempts=$attempts details=${lastFailure?.message}"
             )

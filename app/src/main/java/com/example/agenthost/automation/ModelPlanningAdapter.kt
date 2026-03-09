@@ -137,8 +137,11 @@ class ModelPlanningAdapter(
             append("sessionId=")
             append(request.sessionId)
             append('\n')
+            append("executionDisplayId=")
+            append(request.executionDisplayId)
+            append('\n')
             append("vdDisplayId=")
-            append(request.vdDisplayId)
+            append(request.executionDisplayId)
             append('\n')
             append("sessionTaskId=")
             append(request.sessionTaskId)
@@ -167,7 +170,7 @@ class ModelPlanningAdapter(
         return ModelContext(
             sessionId = sessionId,
             command = command,
-            vdDisplayId = vdDisplayId,
+            vdDisplayId = executionDisplayId,
             sessionTaskId = sessionTaskId,
             step = step,
             capabilityProfile = capabilityProfile,
@@ -215,7 +218,7 @@ class ModelPlanningAdapter(
     ) {
         AgentHostLog.i(
             TAG,
-            "event=$event sessionId=${request.sessionId} vdDisplayId=${request.vdDisplayId} " +
+            "event=$event sessionId=${request.sessionId} executionDisplayId=${request.executionDisplayId} " +
                 "sessionTaskId=${request.sessionTaskId} step=${request.step} plannerMode=${mode.name} " +
                 "actionType=NONE code=$code details=$details"
         )

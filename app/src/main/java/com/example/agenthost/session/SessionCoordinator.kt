@@ -3,7 +3,9 @@ package com.example.agenthost.session
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.provider.Settings
 import android.util.Log
+import android.view.Display
 import com.example.agenthost.automation.AutomationHistory
 import com.example.agenthost.automation.AutomationSessionSnapshot
 import com.example.agenthost.automation.AutomationStateCallbacks
@@ -55,7 +57,9 @@ class SessionCoordinator(
                     AutomationSessionSnapshot(
                         sessionId = state.sessionId,
                         command = state.command,
-                        vdDisplayId = state.vdDisplayId,
+                        executionDisplayId = state.executionDisplayId,
+                        virtualDisplayId = state.virtualDisplayId,
+                        surfaceDisplayId = state.surfaceDisplayId,
                         sessionTaskId = state.sessionTaskId,
                         status = state.status,
                         runtimeHandle = activeRuntime
@@ -69,11 +73,12 @@ class SessionCoordinator(
                     if (state.sessionId != sessionId || state.status != SessionStatus.RUNNING) {
                         return
                     }
-                    val waiting = state.copy(
+                    var waiting = state.copy(
                         status = SessionStatus.WAITING_USER,
                         waitingQuestion = question,
                         automationStep = step,
-                        lastError = null
+                        lastError = null,
+                        pendingReturnToVirtualDisplay = false
                     )
                     activeSession = waiting
                     logInfo(
@@ -84,6 +89,17 @@ class SessionCoordinator(
                         code = "WAITING_USER",
                         extras = "question=$question"
                     )
+                    if (waiting.backgroundPreferred && !waiting.visibleToUser) {
+                        val surfaced = showSessionOnMainLocked(waiting, reason = "waiting_user")
+                        waiting = if (surfaced.visibleToUser) {
+                            surfaced.copy(
+                                pendingReturnToVirtualDisplay = surfaced.returnToVirtualAfterUser
+                            )
+                        } else {
+                            surfaced
+                        }
+                        activeSession = waiting
+                    }
                 }
             }
 
@@ -93,11 +109,15 @@ class SessionCoordinator(
                     if (state.sessionId != sessionId || state.status != SessionStatus.RUNNING) {
                         return
                     }
-                    val completed = state.copy(
-                        status = SessionStatus.COMPLETED,
-                        waitingQuestion = null,
-                        automationStep = step,
-                        lastError = null
+                    val completed = dismissMirrorSurfaceLocked(
+                        state.copy(
+                            status = SessionStatus.COMPLETED,
+                            waitingQuestion = null,
+                            automationStep = step,
+                            lastError = null,
+                            pendingReturnToVirtualDisplay = false
+                        ),
+                        reason = "session_completed"
                     )
                     activeSession = completed
                     logInfo(
@@ -123,11 +143,15 @@ class SessionCoordinator(
                     ) {
                         return
                     }
-                    val failed = state.copy(
-                        status = SessionStatus.FAILED,
-                        waitingQuestion = null,
-                        automationStep = step,
-                        lastError = code
+                    val failed = dismissMirrorSurfaceLocked(
+                        state.copy(
+                            status = SessionStatus.FAILED,
+                            waitingQuestion = null,
+                            automationStep = step,
+                            lastError = code,
+                            pendingReturnToVirtualDisplay = false
+                        ),
+                        reason = "session_failed"
                     )
                     activeSession = failed
                     logError(
@@ -147,19 +171,29 @@ class SessionCoordinator(
         history = automationHistory
     )
 
-    fun startSession(command: String): SessionResult = synchronized(lock) {
+    fun startSession(
+        command: String,
+        options: SessionStartOptions = SessionStartOptions()
+    ): SessionResult = synchronized(lock) {
         val sessionId = UUID.randomUUID().toString()
+        val resolvedMode = options.resolvedDisplayMode()
         logInfo(
             event = "start_session_begin",
             sessionId = sessionId,
-            vdDisplayId = -1,
+            executionDisplayId = null,
+            virtualDisplayId = null,
+            surfaceDisplayId = null,
             sessionTaskId = INVALID_TASK_ID,
             step = 0,
             actionType = "NONE",
             code = "START_BEGIN",
-            extras = "command=$command"
+            extras = "command=$command requestedDisplayMode=${options.displayMode.name} " +
+                "resolvedDisplayMode=${resolvedMode.name} visibleToUser=${options.visibleToUser} " +
+                "returnToVirtualAfterUser=${options.returnToVirtualAfterUser} " +
+                "bootstrapTarget=${options.bootstrapTarget.name}"
         )
-        if (!supportsSecondaryDisplays()) {
+
+        if (resolvedMode == SessionDisplayMode.VIRTUAL_DISPLAY && !supportsSecondaryDisplays()) {
             return@synchronized failResult("SECONDARY_DISPLAY_UNSUPPORTED")
         }
 
@@ -168,73 +202,66 @@ class SessionCoordinator(
             stopSessionLocked(migrate = false, preemptive = true)
         }
 
-        val runtime = virtualDisplayRuntime.create()
-            ?: return@synchronized failAndCleanupLocked(
-                code = "VD_CREATE_FAILED",
-                state = null
-            )
-
-        val vdDisplayId = runtime.vdDisplayId
+        val runtime = if (resolvedMode == SessionDisplayMode.VIRTUAL_DISPLAY) {
+            virtualDisplayRuntime.create()
+                ?: return@synchronized failAndCleanupLocked(
+                    code = "VD_CREATE_FAILED",
+                    state = null
+                )
+        } else {
+            null
+        }
+        val executionDisplayId = runtime?.vdDisplayId ?: Display.DEFAULT_DISPLAY
         var state = SessionState(
             sessionId = sessionId,
             command = command,
-            vdDisplayId = vdDisplayId,
+            executionDisplayId = executionDisplayId,
+            virtualDisplayId = runtime?.vdDisplayId,
+            surfaceDisplayId = if (resolvedMode == SessionDisplayMode.MAIN_DISPLAY) {
+                Display.DEFAULT_DISPLAY
+            } else {
+                null
+            },
             sessionTaskId = INVALID_TASK_ID,
             status = SessionStatus.STARTING,
             lastError = null,
             waitingQuestion = null,
-            automationStep = 0
+            automationStep = 0,
+            displayMode = resolvedMode,
+            visibleToUser = resolvedMode == SessionDisplayMode.MAIN_DISPLAY,
+            backgroundPreferred = resolvedMode != SessionDisplayMode.MAIN_DISPLAY,
+            returnToVirtualAfterUser = options.returnToVirtualAfterUser,
+            pendingReturnToVirtualDisplay = false,
+            bootstrapTarget = options.bootstrapTarget,
+            lastBootstrapCode = null
         )
         activeRuntime = runtime
         activeSession = state
-        SessionBridge.registerWaiter(sessionId)
+
+        runtime?.let {
+            logInfo(
+                event = "virtual_display_created",
+                state = state,
+                step = 0,
+                actionType = "NONE",
+                code = "VD_CREATED",
+                extras = "virtualDisplayId=${it.vdDisplayId} command=$command"
+            )
+        }
         logInfo(
-            event = "vd_created",
+            event = "session_display_mode_selected",
             state = state,
             step = 0,
             actionType = "NONE",
-            code = "VD_CREATED",
-            extras = "command=$command"
+            code = "DISPLAY_MODE_SELECTED",
+            extras = "displayMode=${resolvedMode.name} executionDisplayId=$executionDisplayId"
         )
 
         val debugStartInjection = SessionAuditHooks.consumeStartInjection()
         activePlannerConfig = debugStartInjection.plannerConfigOverride ?: PlannerConfig()
-        val intent = Intent(appContext, SessionRootActivity::class.java).apply {
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            putExtra(SessionRootActivity.EXTRA_SESSION_ID, sessionId)
-            putExtra(SessionRootActivity.EXTRA_VD_DISPLAY_ID, vdDisplayId)
-            putExtra(SessionRootActivity.EXTRA_COMMAND, command)
-            if (debugStartInjection.skipAttach) {
-                putExtra(SessionRootActivity.EXTRA_DEBUG_SKIP_ATTACH, true)
-            }
-            debugStartInjection.forceReportDisplayId?.let {
-                putExtra(SessionRootActivity.EXTRA_DEBUG_FORCE_REPORT_DISPLAY_ID, it)
-            }
-        }
-
-        val options = LaunchOptionsCompat.build(vdDisplayId)
-            ?: return@synchronized failAndCleanupLocked(
-                code = "SESSION_ROOT_INFEASIBLE",
-                state = state
-            )
-
-        try {
-            appContext.startActivity(intent, options.toBundle())
-        } catch (t: Throwable) {
-            val infeasible = t is IllegalArgumentException ||
-                t is IllegalStateException ||
-                t is UnsupportedOperationException
-            val code = if (infeasible) "SESSION_ROOT_INFEASIBLE" else "SESSION_ROOT_LAUNCH_FAILED"
-            logError(
-                event = "session_root_launch_failed",
-                state = state,
-                step = 0,
-                actionType = "NONE",
-                code = code,
-                extras = "command=$command",
-                error = t
-            )
-            return@synchronized failAndCleanupLocked(code = code, state = state)
+        val launch = launchPrimaryRootLocked(state, debugStartInjection)
+        if (!launch.ok) {
+            return@synchronized failAndCleanupLocked(code = launch.code, state = state)
         }
 
         val ack = SessionBridge.await(sessionId, attachTimeoutMs)
@@ -242,8 +269,7 @@ class SessionCoordinator(
                 code = "SESSION_ATTACH_TIMEOUT",
                 state = state
             )
-
-        if (ack.displayId != vdDisplayId) {
+        if (ack.displayId != executionDisplayId) {
             logError(
                 event = "session_display_mismatch",
                 state = state,
@@ -257,7 +283,6 @@ class SessionCoordinator(
                 state = state
             )
         }
-
         if (ack.taskId <= 0) {
             return@synchronized failAndCleanupLocked(
                 code = "SESSION_ROOT_LAUNCH_FAILED",
@@ -281,6 +306,15 @@ class SessionCoordinator(
             code = "SESSION_READY",
             extras = "component=${ack.component}"
         )
+
+        state = bootstrapExecutionDisplayLocked(state)
+        activeSession = state
+
+        if (resolvedMode == SessionDisplayMode.VIRTUAL_DISPLAY && options.visibleToUser) {
+            state = showSessionOnMainLocked(state, reason = "start_visible")
+            activeSession = state
+        }
+
         okResult(
             code = "SESSION_READY",
             state = state,
@@ -316,6 +350,17 @@ class SessionCoordinator(
             lastError = null
         )
         activeSession = running
+        if (running.bootstrapTarget != SessionBootstrapTarget.NONE) {
+            logInfo(
+                event = "automation_begin_after_bootstrap",
+                state = running,
+                step = 0,
+                actionType = "NONE",
+                code = "AUTOMATION_BEGIN_AFTER_BOOTSTRAP",
+                extras = "bootstrapTarget=${running.bootstrapTarget.name} " +
+                    "bootstrapCode=${running.lastBootstrapCode ?: "NOT_ATTEMPTED"}"
+            )
+        }
         val result = automationEngine.startAutomation(sessionId)
         return@synchronized if (result.ok) {
             logInfo(
@@ -371,16 +416,22 @@ class SessionCoordinator(
             )
         }
 
-        val running = state.copy(
+        val preResume = if (state.pendingReturnToVirtualDisplay) {
+            dismissMirrorSurfaceLocked(state, reason = "reply_received")
+        } else {
+            state
+        }
+        val running = preResume.copy(
             status = SessionStatus.RUNNING,
             waitingQuestion = null,
-            lastError = null
+            lastError = null,
+            pendingReturnToVirtualDisplay = false
         )
         activeSession = running
         val result = automationEngine.replyToSession(sessionId, trimmed)
         return@synchronized if (result.ok) {
             logInfo(
-                event = "automation_start",
+                event = "automation_resumed_after_reply",
                 state = running,
                 step = running.automationStep,
                 actionType = "NONE",
@@ -410,6 +461,40 @@ class SessionCoordinator(
         }
     }
 
+    fun showSessionOnMain(sessionId: String? = null): SessionResult = synchronized(lock) {
+        val state = requireActiveSessionLocked(sessionId) ?: return@synchronized failResult("NO_ACTIVE_SESSION")
+        if (state.displayMode == SessionDisplayMode.MAIN_DISPLAY) {
+            return@synchronized okResult("SESSION_ALREADY_ON_MAIN_DISPLAY", state)
+        }
+        if (state.visibleToUser && state.surfaceDisplayId == Display.DEFAULT_DISPLAY) {
+            return@synchronized okResult("SESSION_ALREADY_SURFACED_ON_MAIN", state)
+        }
+        val updated = showSessionOnMainLocked(state, reason = "debug_request")
+        activeSession = updated
+        return@synchronized if (updated.visibleToUser) {
+            okResult("SESSION_SURFACED_ON_MAIN", updated)
+        } else {
+            failResult("SESSION_SURFACE_LAUNCH_FAILED", stateData(updated))
+        }
+    }
+
+    fun returnSessionToVirtual(sessionId: String? = null): SessionResult = synchronized(lock) {
+        val state = requireActiveSessionLocked(sessionId) ?: return@synchronized failResult("NO_ACTIVE_SESSION")
+        if (state.virtualDisplayId == null) {
+            return@synchronized failResult("SESSION_NOT_VIRTUAL_DISPLAY", stateData(state))
+        }
+        if (!state.visibleToUser || state.surfaceDisplayId == null) {
+            val background = state.copy(pendingReturnToVirtualDisplay = false)
+            activeSession = background
+            return@synchronized okResult("SESSION_ALREADY_ON_VIRTUAL_DISPLAY", background)
+        }
+        val updated = dismissMirrorSurfaceLocked(state, reason = "debug_request").copy(
+            pendingReturnToVirtualDisplay = false
+        )
+        activeSession = updated
+        return@synchronized okResult("SESSION_RETURNED_TO_VIRTUAL", updated)
+    }
+
     fun markRunning(sessionId: String? = null): SessionResult = synchronized(lock) {
         val state = activeSession ?: return@synchronized failResult("NO_ACTIVE_SESSION")
         val targetSessionId = sessionId ?: state.sessionId
@@ -426,7 +511,9 @@ class SessionCoordinator(
             logInfo(
                 event = "dump_active_session",
                 sessionId = null,
-                vdDisplayId = -1,
+                executionDisplayId = null,
+                virtualDisplayId = null,
+                surfaceDisplayId = null,
                 sessionTaskId = INVALID_TASK_ID,
                 step = 0,
                 actionType = "NONE",
@@ -439,7 +526,9 @@ class SessionCoordinator(
                 state = state,
                 step = state.automationStep,
                 actionType = "NONE",
-                code = "DUMP_ACTIVE_SESSION"
+                code = "DUMP_ACTIVE_SESSION",
+                extras = "displayMode=${state.displayMode.name} visibleToUser=${state.visibleToUser} " +
+                    "pendingReturnToVirtualDisplay=${state.pendingReturnToVirtualDisplay}"
             )
             okResult(code = "DUMP_ACTIVE_SESSION", state = state)
         }
@@ -449,10 +538,11 @@ class SessionCoordinator(
 
     private fun stopSessionLocked(migrate: Boolean, preemptive: Boolean): SessionResult {
         val state = activeSession ?: return failResult("NO_ACTIVE_SESSION")
-        val stopping = state.copy(
+        var stopping = state.copy(
             status = SessionStatus.STOPPING,
             lastError = null,
-            waitingQuestion = null
+            waitingQuestion = null,
+            pendingReturnToVirtualDisplay = false
         )
         activeSession = stopping
         logInfo(
@@ -473,6 +563,9 @@ class SessionCoordinator(
             code = stopResult.code,
             extras = "details=${stopResult.details}"
         )
+
+        stopping = dismissMirrorSurfaceLocked(stopping, reason = "stop_session")
+        activeSession = stopping
 
         val taskId = stopping.sessionTaskId
         if (taskId <= 0) {
@@ -509,9 +602,17 @@ class SessionCoordinator(
             val finalStatus = if (migrate) SessionStatus.MIGRATED else SessionStatus.CLOSED
             val finalCode = if (migrate) "MIGRATED_TO_DEFAULT_DISPLAY" else "CLOSED"
             val finalState = stopping.copy(
+                executionDisplayId = if (migrate) Display.DEFAULT_DISPLAY else stopping.executionDisplayId,
+                surfaceDisplayId = if (migrate && stopping.displayMode == SessionDisplayMode.MAIN_DISPLAY) {
+                    Display.DEFAULT_DISPLAY
+                } else {
+                    null
+                },
                 status = finalStatus,
                 lastError = null,
-                waitingQuestion = null
+                waitingQuestion = null,
+                visibleToUser = migrate && stopping.displayMode == SessionDisplayMode.MAIN_DISPLAY,
+                pendingReturnToVirtualDisplay = false
             )
             activeSession = finalState
             logInfo(
@@ -536,12 +637,222 @@ class SessionCoordinator(
         }
     }
 
+    private fun launchPrimaryRootLocked(
+        state: SessionState,
+        debugStartInjection: SessionAuditHooks.StartInjection
+    ): SessionResult {
+        SessionBridge.registerWaiter(state.sessionId)
+        val intent = buildSessionRootIntent(
+            state = state,
+            rootRole = SessionRootActivity.ROOT_ROLE_PRIMARY
+        ).apply {
+            if (debugStartInjection.skipAttach) {
+                putExtra(SessionRootActivity.EXTRA_DEBUG_SKIP_ATTACH, true)
+            }
+            debugStartInjection.forceReportDisplayId?.let {
+                putExtra(SessionRootActivity.EXTRA_DEBUG_FORCE_REPORT_DISPLAY_ID, it)
+            }
+        }
+        val options = LaunchOptionsCompat.build(state.executionDisplayId)
+            ?: return failResult("SESSION_ROOT_INFEASIBLE", stateData(state))
+
+        return try {
+            appContext.startActivity(intent, options.toBundle())
+            okResult("SESSION_ROOT_LAUNCHED", state)
+        } catch (t: Throwable) {
+            val infeasible = t is IllegalArgumentException ||
+                t is IllegalStateException ||
+                t is UnsupportedOperationException
+            val code = if (infeasible) "SESSION_ROOT_INFEASIBLE" else "SESSION_ROOT_LAUNCH_FAILED"
+            logError(
+                event = "session_root_launch_failed",
+                state = state,
+                step = 0,
+                actionType = "NONE",
+                code = code,
+                extras = "command=${state.command} displayMode=${state.displayMode.name}",
+                error = t
+            )
+            failResult(code, stateData(state))
+        }
+    }
+
+    private fun bootstrapExecutionDisplayLocked(state: SessionState): SessionState {
+        if (state.bootstrapTarget == SessionBootstrapTarget.NONE) {
+            return state
+        }
+        val intentAction = when (state.bootstrapTarget) {
+            SessionBootstrapTarget.SETTINGS -> Settings.ACTION_SETTINGS
+            SessionBootstrapTarget.NONE -> return state
+        }
+        logInfo(
+            event = "execution_display_bootstrap_begin",
+            state = state,
+            step = 0,
+            actionType = "NONE",
+            code = "EXECUTION_DISPLAY_BOOTSTRAP_BEGIN",
+            extras = "bootstrapTarget=${state.bootstrapTarget.name} intentAction=$intentAction"
+        )
+
+        val options = LaunchOptionsCompat.build(state.executionDisplayId)
+        if (options == null) {
+            val updated = state.copy(lastBootstrapCode = "EXECUTION_DISPLAY_BOOTSTRAP_INFEASIBLE")
+            logError(
+                event = "execution_display_bootstrap_failed",
+                state = updated,
+                step = 0,
+                actionType = "NONE",
+                code = "EXECUTION_DISPLAY_BOOTSTRAP_INFEASIBLE",
+                extras = "bootstrapTarget=${state.bootstrapTarget.name} reason=launch_options_unavailable"
+            )
+            return updated
+        }
+
+        val intent = Intent(intentAction).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        return try {
+            appContext.startActivity(intent, options.toBundle())
+            val updated = state.copy(lastBootstrapCode = "EXECUTION_DISPLAY_BOOTSTRAP_OK")
+            logInfo(
+                event = "execution_display_bootstrap_success",
+                state = updated,
+                step = 0,
+                actionType = "NONE",
+                code = "EXECUTION_DISPLAY_BOOTSTRAP_OK",
+                extras = "bootstrapTarget=${state.bootstrapTarget.name} intentAction=$intentAction"
+            )
+            updated
+        } catch (t: Throwable) {
+            val infeasible = t is IllegalArgumentException ||
+                t is IllegalStateException ||
+                t is UnsupportedOperationException
+            val code = if (infeasible) {
+                "EXECUTION_DISPLAY_BOOTSTRAP_INFEASIBLE"
+            } else {
+                "EXECUTION_DISPLAY_BOOTSTRAP_FAILED"
+            }
+            val updated = state.copy(lastBootstrapCode = code)
+            logError(
+                event = "execution_display_bootstrap_failed",
+                state = updated,
+                step = 0,
+                actionType = "NONE",
+                code = code,
+                extras = "bootstrapTarget=${state.bootstrapTarget.name} intentAction=$intentAction",
+                error = t
+            )
+            updated
+        }
+    }
+
+    private fun showSessionOnMainLocked(state: SessionState, reason: String): SessionState {
+        if (state.displayMode == SessionDisplayMode.MAIN_DISPLAY) {
+            return state.copy(
+                visibleToUser = true,
+                surfaceDisplayId = Display.DEFAULT_DISPLAY
+            )
+        }
+        if (state.visibleToUser && state.surfaceDisplayId == Display.DEFAULT_DISPLAY) {
+            return state
+        }
+
+        SessionSurfaceRegistry.finish(state.sessionId)
+        val surfaced = state.copy(
+            visibleToUser = true,
+            surfaceDisplayId = Display.DEFAULT_DISPLAY
+        )
+        val intent = buildSessionRootIntent(
+            state = surfaced,
+            rootRole = SessionRootActivity.ROOT_ROLE_MIRROR
+        ).apply {
+            addFlags(Intent.FLAG_ACTIVITY_MULTIPLE_TASK)
+        }
+        val options = LaunchOptionsCompat.build(Display.DEFAULT_DISPLAY)
+        if (options == null) {
+            logError(
+                event = "session_surface_launch_failed",
+                state = state,
+                code = "SESSION_SURFACE_INFEASIBLE",
+                extras = "reason=$reason"
+            )
+            return state
+        }
+
+        return try {
+            appContext.startActivity(intent, options.toBundle())
+            logInfo(
+                event = "session_surface_on_main",
+                state = surfaced,
+                code = "SESSION_SURFACED_ON_MAIN",
+                extras = "reason=$reason status=${state.status.name}"
+            )
+            surfaced
+        } catch (t: Throwable) {
+            logError(
+                event = "session_surface_launch_failed",
+                state = state,
+                code = "SESSION_SURFACE_LAUNCH_FAILED",
+                extras = "reason=$reason",
+                error = t
+            )
+            state
+        }
+    }
+
+    private fun dismissMirrorSurfaceLocked(state: SessionState, reason: String): SessionState {
+        if (state.displayMode == SessionDisplayMode.MAIN_DISPLAY) {
+            return state.copy(pendingReturnToVirtualDisplay = false)
+        }
+        if (!state.visibleToUser || state.surfaceDisplayId == null) {
+            return state.copy(
+                visibleToUser = false,
+                surfaceDisplayId = null,
+                pendingReturnToVirtualDisplay = false
+            )
+        }
+        SessionSurfaceRegistry.finish(state.sessionId)
+        val updated = state.copy(
+            visibleToUser = false,
+            surfaceDisplayId = null,
+            pendingReturnToVirtualDisplay = false
+        )
+        logInfo(
+            event = "session_surface_dismissed",
+            state = updated,
+            code = "SESSION_RETURNED_TO_VIRTUAL",
+            extras = "reason=$reason status=${state.status.name}"
+        )
+        return updated
+    }
+
+    private fun buildSessionRootIntent(state: SessionState, rootRole: String): Intent {
+        return Intent(appContext, SessionRootActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            putExtra(SessionRootActivity.EXTRA_SESSION_ID, state.sessionId)
+            putExtra(SessionRootActivity.EXTRA_EXECUTION_DISPLAY_ID, state.executionDisplayId)
+            state.virtualDisplayId?.let {
+                putExtra(SessionRootActivity.EXTRA_VIRTUAL_DISPLAY_ID, it)
+            }
+            state.surfaceDisplayId?.let {
+                putExtra(SessionRootActivity.EXTRA_SURFACE_DISPLAY_ID, it)
+            }
+            putExtra(SessionRootActivity.EXTRA_COMMAND, state.command)
+            putExtra(SessionRootActivity.EXTRA_ROOT_ROLE, rootRole)
+            putExtra(SessionRootActivity.EXTRA_STATUS, state.status.name)
+            putExtra(SessionRootActivity.EXTRA_WAITING_QUESTION, state.waitingQuestion)
+            putExtra(SessionRootActivity.EXTRA_DISPLAY_MODE, state.displayMode.name)
+        }
+    }
+
     private fun failAndCleanupLocked(code: String, state: SessionState?): SessionResult {
         if (state != null) {
-            val failedState = state.copy(
+            val failedBase = dismissMirrorSurfaceLocked(state, reason = "fail_cleanup")
+            val failedState = failedBase.copy(
                 status = SessionStatus.FAILED,
                 lastError = code,
-                waitingQuestion = null
+                waitingQuestion = null,
+                pendingReturnToVirtualDisplay = false
             )
             activeSession = failedState
             logError(
@@ -558,7 +869,9 @@ class SessionCoordinator(
         logError(
             event = "session_failed",
             sessionId = null,
-            vdDisplayId = -1,
+            executionDisplayId = null,
+            virtualDisplayId = null,
+            surfaceDisplayId = null,
             sessionTaskId = INVALID_TASK_ID,
             step = 0,
             actionType = "NONE",
@@ -569,6 +882,7 @@ class SessionCoordinator(
 
     private fun cleanupLocked(sessionId: String?) {
         sessionId?.let {
+            SessionSurfaceRegistry.finish(it)
             SessionBridge.clear(it)
             automationEngine.clearSession(it)
         }
@@ -582,6 +896,15 @@ class SessionCoordinator(
         return appContext.packageManager.hasSystemFeature(
             PackageManager.FEATURE_ACTIVITIES_ON_SECONDARY_DISPLAYS
         )
+    }
+
+    private fun requireActiveSessionLocked(sessionId: String?): SessionState? {
+        val state = activeSession ?: return null
+        return if (sessionId.isNullOrBlank() || sessionId == state.sessionId) {
+            state
+        } else {
+            null
+        }
     }
 
     private fun okResult(
@@ -604,10 +927,21 @@ class SessionCoordinator(
     private fun stateData(state: SessionState): Map<String, Any?> {
         return mapOf(
             "sessionId" to state.sessionId,
-            "displayId" to state.vdDisplayId,
+            "displayId" to state.executionDisplayId,
+            "executionDisplayId" to state.executionDisplayId,
+            "virtualDisplayId" to state.virtualDisplayId,
+            "surfaceDisplayId" to state.surfaceDisplayId,
+            "vdDisplayId" to state.virtualDisplayId,
             "taskId" to state.sessionTaskId,
             "status" to state.status.name,
             "command" to state.command,
+            "displayMode" to state.displayMode.name,
+            "visibleToUser" to state.visibleToUser,
+            "backgroundPreferred" to state.backgroundPreferred,
+            "returnToVirtualAfterUser" to state.returnToVirtualAfterUser,
+            "pendingReturnToVirtualDisplay" to state.pendingReturnToVirtualDisplay,
+            "bootstrapTarget" to state.bootstrapTarget.name,
+            "lastBootstrapCode" to state.lastBootstrapCode,
             "lastError" to state.lastError,
             "waitingQuestion" to state.waitingQuestion,
             "automationStep" to state.automationStep,
@@ -620,7 +954,9 @@ class SessionCoordinator(
         event: String,
         state: SessionState? = null,
         sessionId: String? = null,
-        vdDisplayId: Int? = null,
+        executionDisplayId: Int? = null,
+        virtualDisplayId: Int? = null,
+        surfaceDisplayId: Int? = null,
         sessionTaskId: Int? = null,
         step: Int? = null,
         actionType: String? = null,
@@ -633,7 +969,9 @@ class SessionCoordinator(
                 event = event,
                 state = state,
                 sessionId = sessionId,
-                vdDisplayId = vdDisplayId,
+                executionDisplayId = executionDisplayId,
+                virtualDisplayId = virtualDisplayId,
+                surfaceDisplayId = surfaceDisplayId,
                 sessionTaskId = sessionTaskId,
                 step = step,
                 actionType = actionType,
@@ -647,7 +985,9 @@ class SessionCoordinator(
         event: String,
         state: SessionState? = null,
         sessionId: String? = null,
-        vdDisplayId: Int? = null,
+        executionDisplayId: Int? = null,
+        virtualDisplayId: Int? = null,
+        surfaceDisplayId: Int? = null,
         sessionTaskId: Int? = null,
         step: Int? = null,
         actionType: String? = null,
@@ -659,7 +999,9 @@ class SessionCoordinator(
             event = event,
             state = state,
             sessionId = sessionId,
-            vdDisplayId = vdDisplayId,
+            executionDisplayId = executionDisplayId,
+            virtualDisplayId = virtualDisplayId,
+            surfaceDisplayId = surfaceDisplayId,
             sessionTaskId = sessionTaskId,
             step = step,
             actionType = actionType,
@@ -677,7 +1019,9 @@ class SessionCoordinator(
         event: String,
         state: SessionState?,
         sessionId: String?,
-        vdDisplayId: Int?,
+        executionDisplayId: Int?,
+        virtualDisplayId: Int?,
+        surfaceDisplayId: Int?,
         sessionTaskId: Int?,
         step: Int?,
         actionType: String?,
@@ -685,12 +1029,27 @@ class SessionCoordinator(
         extras: String?
     ): String {
         val sid = sessionId ?: state?.sessionId ?: "null"
-        val did = vdDisplayId ?: state?.vdDisplayId ?: -1
+        val executionId = executionDisplayId ?: state?.executionDisplayId ?: -1
+        val virtualId = virtualDisplayId ?: state?.virtualDisplayId
+        val surfaceId = surfaceDisplayId ?: state?.surfaceDisplayId
         val tid = sessionTaskId ?: state?.sessionTaskId ?: INVALID_TASK_ID
         val stp = step ?: state?.automationStep ?: 0
         val at = actionType ?: "NONE"
         val ext = extras ?: "{}"
-        return "event=$event sessionId=$sid vdDisplayId=$did sessionTaskId=$tid " +
-            "step=$stp actionType=$at code=$code extras=$ext"
+        return buildString {
+            append("event=").append(event)
+            append(" sessionId=").append(sid)
+            append(" executionDisplayId=").append(executionId)
+            append(" virtualDisplayId=").append(virtualId ?: "null")
+            append(" surfaceDisplayId=").append(surfaceId ?: "null")
+            append(" sessionTaskId=").append(tid)
+            append(" step=").append(stp)
+            append(" actionType=").append(at)
+            append(" code=").append(code)
+            append(" extras=").append(ext)
+            if (virtualId != null) {
+                append(" vdDisplayId=").append(virtualId)
+            }
+        }
     }
 }

@@ -117,7 +117,7 @@ class ModelPlanningAdapterTest {
             sessionId = "session-1",
             command = "open settings",
             step = 1,
-            vdDisplayId = 42,
+            executionDisplayId = 42,
             sessionTaskId = 314,
             planningMode = PlanningMode.MODEL,
             capabilityProfile = capabilityProfile,
