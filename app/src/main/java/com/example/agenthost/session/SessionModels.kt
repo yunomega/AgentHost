@@ -33,9 +33,14 @@ data class SessionState(
     val sessionId: String,
     val command: String,
     val executionDisplayId: Int,
+    val currentExecutionDisplayId: Int,
+    val currentVisibleDisplayId: Int?,
     val virtualDisplayId: Int?,
     val surfaceDisplayId: Int?,
     val sessionTaskId: Int,
+    val lastKnownTaskId: Int,
+    val lastKnownTopActivity: String?,
+    val lastKnownTopPackage: String?,
     val status: SessionStatus,
     val lastError: String?,
     val waitingQuestion: String?,
@@ -45,10 +50,19 @@ data class SessionState(
     val backgroundPreferred: Boolean,
     val returnToVirtualAfterUser: Boolean,
     val pendingReturnToVirtualDisplay: Boolean,
+    val migratedToMain: Boolean,
+    val lastMigrationCode: String?,
+    val lastMigrationDirection: String?,
+    val lastMigrationConflictCode: String? = null,
+    val lastMigrationConflictReason: String? = null,
+    val lastKnownTaskAlive: Boolean? = null,
+    val lastKnownTaskDisplayId: Int? = null,
+    val userForegroundTaskId: Int? = null,
+    val recoveryNeeded: Boolean = false,
     val bootstrapTarget: SessionBootstrapTarget,
     val lastBootstrapCode: String?
 ) {
-    fun isOnMainDisplay(): Boolean = executionDisplayId == Display.DEFAULT_DISPLAY
+    fun isOnMainDisplay(): Boolean = currentVisibleDisplayId == Display.DEFAULT_DISPLAY
 }
 
 enum class SessionStatus {

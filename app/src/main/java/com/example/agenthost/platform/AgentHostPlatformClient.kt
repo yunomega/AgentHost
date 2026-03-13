@@ -451,6 +451,7 @@ class AgentHostPlatformClient(
         AgentHostLog.i(
             TAG,
             "event=platform_call_begin sessionId=$sessionId executionDisplayId=$displayId " +
+                "${displayAliasToken(actionType, displayId)} " +
                 "sessionTaskId=-1 step=0 actionType=$actionType code=CALL_BEGIN extras={}"
         )
     }
@@ -463,6 +464,7 @@ class AgentHostPlatformClient(
         details: String
     ) {
         val message = "event=platform_call_failed sessionId=$sessionId executionDisplayId=$displayId " +
+            "${displayAliasToken(actionType, displayId)} " +
             "sessionTaskId=-1 step=0 actionType=$actionType code=$code extras=details=$details"
         if (code == PlatformResultCodes.PERMISSION_DENIED || code == PlatformResultCodes.INTERNAL_ERROR) {
             AgentHostLog.e(TAG, message)
@@ -475,6 +477,7 @@ class AgentHostPlatformClient(
         AgentHostLog.e(
             TAG,
             "event=platform_call_timeout sessionId=$sessionId executionDisplayId=$displayId " +
+                "${displayAliasToken(actionType, displayId)} " +
                 "sessionTaskId=-1 step=0 actionType=$actionType code=CALL_TIMEOUT " +
                 "extras=timeoutMs=$timeoutMs"
         )
@@ -484,7 +487,16 @@ class AgentHostPlatformClient(
         AgentHostLog.i(
             TAG,
             "event=platform_call_success sessionId=$sessionId executionDisplayId=$displayId " +
+                "${displayAliasToken(actionType, displayId)} " +
                 "sessionTaskId=-1 step=0 actionType=$actionType code=CALL_OK extras=$extras"
         )
+    }
+
+    private fun displayAliasToken(actionType: String, displayId: Int): String {
+        return if (actionType == "CAPTURE") {
+            "captureDisplayId=$displayId"
+        } else {
+            "injectDisplayId=$displayId"
+        }
     }
 }

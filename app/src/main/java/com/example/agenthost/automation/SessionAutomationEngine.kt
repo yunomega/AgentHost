@@ -225,7 +225,8 @@ class SessionAutomationEngine(
                         step = step,
                         actionType = "NONE",
                         code = "OBSERVATION_OK",
-                        extras = "width=${observation.width} height=${observation.height}"
+                        extras = "observationDisplayId=${snapshot.executionDisplayId} " +
+                            "width=${observation.width} height=${observation.height}"
                     )
                 }
 
@@ -240,7 +241,8 @@ class SessionAutomationEngine(
                         step = step,
                         actionType = "NONE",
                         code = observation.code,
-                        extras = "message=${observation.message}"
+                        extras = "observationDisplayId=${snapshot.executionDisplayId} " +
+                            "message=${observation.message}"
                     )
                 }
             }
@@ -494,7 +496,8 @@ class SessionAutomationEngine(
                                 step = step,
                                 actionType = actionType,
                                 code = execution.code,
-                                extras = "details=${execution.details}"
+                                extras = "injectDisplayId=${snapshot.executionDisplayId} " +
+                                    "details=${execution.details}"
                             )
                         }
                     }

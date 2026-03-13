@@ -118,6 +118,28 @@ class SessionAuditReceiver : BroadcastReceiver() {
                 writeBroadcastResult(pendingResult, "debug_reply_session", result)
             }
 
+            "$pkg.debug.MIGRATE_TO_MAIN" -> {
+                val sessionId = intent.getStringExtra(EXTRA_SESSION_ID).orEmpty()
+                val result = AgentHostRuntime.sessionCoordinator(context).migrateTaskToMain(sessionId)
+                logResult(
+                    event = "debug_migrate_to_main",
+                    result = result,
+                    extras = "sessionId=$sessionId"
+                )
+                writeBroadcastResult(pendingResult, "debug_migrate_to_main", result)
+            }
+
+            "$pkg.debug.MIGRATE_TO_EXECUTION" -> {
+                val sessionId = intent.getStringExtra(EXTRA_SESSION_ID).orEmpty()
+                val result = AgentHostRuntime.sessionCoordinator(context).migrateTaskToExecution(sessionId)
+                logResult(
+                    event = "debug_migrate_to_execution",
+                    result = result,
+                    extras = "sessionId=$sessionId"
+                )
+                writeBroadcastResult(pendingResult, "debug_migrate_to_execution", result)
+            }
+
             "$pkg.debug.DUMP_ACTIVE_SESSION" -> {
                 val result = AgentHostRuntime.sessionCoordinator(context).dumpActiveSession()
                 logResult(
@@ -260,9 +282,23 @@ class SessionAuditReceiver : BroadcastReceiver() {
     private fun logResult(event: String, result: SessionResult, extras: String) {
         val sessionId = result.data["sessionId"] ?: "null"
         val executionDisplayId = result.data["executionDisplayId"] ?: result.data["displayId"] ?: -1
+        val currentExecutionDisplayId = result.data["currentExecutionDisplayId"] ?: executionDisplayId
+        val currentVisibleDisplayId = result.data["currentVisibleDisplayId"] ?: "null"
         val virtualDisplayId = result.data["virtualDisplayId"] ?: "null"
         val surfaceDisplayId = result.data["surfaceDisplayId"] ?: "null"
         val sessionTaskId = result.data["taskId"] ?: -1
+        val lastKnownTaskId = result.data["lastKnownTaskId"] ?: -1
+        val lastKnownTaskAlive = result.data["lastKnownTaskAlive"] ?: "null"
+        val lastKnownTaskDisplayId = result.data["lastKnownTaskDisplayId"] ?: "null"
+        val lastMigrationCode = result.data["lastMigrationCode"] ?: "null"
+        val lastMigrationDirection = result.data["lastMigrationDirection"] ?: "null"
+        val lastMigrationConflictCode = result.data["lastMigrationConflictCode"] ?: "null"
+        val lastMigrationConflictReason = result.data["lastMigrationConflictReason"] ?: "null"
+        val migratedToMain = result.data["migratedToMain"] ?: "null"
+        val userForegroundTaskId = result.data["userForegroundTaskId"] ?: "null"
+        val recoveryNeeded = result.data["recoveryNeeded"] ?: "null"
+        val lastKnownTopActivity = result.data["lastKnownTopActivity"] ?: "null"
+        val lastKnownTopPackage = result.data["lastKnownTopPackage"] ?: "null"
         val step = result.data["automationStep"] ?: 0
         val plannerMode = result.data["plannerMode"] ?: "UNKNOWN"
         val actionType = result.data["actionType"] ?: "NONE"
@@ -277,11 +313,20 @@ class SessionAuditReceiver : BroadcastReceiver() {
         Log.i(
             TAG,
             "event=$event sessionId=$sessionId executionDisplayId=$executionDisplayId " +
+                "currentExecutionDisplayId=$currentExecutionDisplayId " +
+                "currentVisibleDisplayId=$currentVisibleDisplayId " +
                 "virtualDisplayId=$virtualDisplayId surfaceDisplayId=$surfaceDisplayId " +
                 "sessionTaskId=$sessionTaskId step=$step plannerMode=$plannerMode actionType=$actionType " +
                 "status=$status displayMode=$displayMode bootstrapTarget=$bootstrapTarget " +
                 "bootstrapCode=$bootstrapCode visibleToUser=$visibleToUser " +
                 "pendingReturnToVirtualDisplay=$pendingReturn waitingQuestion=$waitingQuestion " +
+                "lastKnownTaskId=$lastKnownTaskId lastKnownTaskAlive=$lastKnownTaskAlive " +
+                "lastKnownTaskDisplayId=$lastKnownTaskDisplayId " +
+                "lastKnownTopActivity=$lastKnownTopActivity lastKnownTopPackage=$lastKnownTopPackage " +
+                "migratedToMain=$migratedToMain userForegroundTaskId=$userForegroundTaskId " +
+                "recoveryNeeded=$recoveryNeeded lastMigrationDirection=$lastMigrationDirection " +
+                "lastMigrationCode=$lastMigrationCode lastMigrationConflictCode=$lastMigrationConflictCode " +
+                "lastMigrationConflictReason=$lastMigrationConflictReason " +
                 "code=${result.code} extras=ok=${result.ok} $extras"
         )
     }
@@ -291,23 +336,41 @@ class SessionAuditReceiver : BroadcastReceiver() {
         event: String,
         result: SessionResult
     ) {
+        fun JSONObject.putNullable(key: String, value: Any?) {
+            put(key, value ?: JSONObject.NULL)
+        }
+
         val payload = JSONObject().apply {
             put("event", event)
             put("ok", result.ok)
             put("code", result.code)
-            put("sessionId", result.data["sessionId"])
-            put("status", result.data["status"])
-            put("displayMode", result.data["displayMode"])
-            put("executionDisplayId", result.data["executionDisplayId"] ?: result.data["displayId"])
-            put("virtualDisplayId", result.data["virtualDisplayId"])
-            put("surfaceDisplayId", result.data["surfaceDisplayId"])
-            put("taskId", result.data["taskId"])
-            put("visibleToUser", result.data["visibleToUser"])
-            put("pendingReturnToVirtualDisplay", result.data["pendingReturnToVirtualDisplay"])
-            put("bootstrapTarget", result.data["bootstrapTarget"])
-            put("bootstrapCode", result.data["lastBootstrapCode"])
-            put("waitingQuestion", result.data["waitingQuestion"])
-            put("lastError", result.data["lastError"])
+            putNullable("sessionId", result.data["sessionId"])
+            putNullable("status", result.data["status"])
+            putNullable("displayMode", result.data["displayMode"])
+            putNullable("executionDisplayId", result.data["executionDisplayId"] ?: result.data["displayId"])
+            putNullable("currentExecutionDisplayId", result.data["currentExecutionDisplayId"])
+            putNullable("currentVisibleDisplayId", result.data["currentVisibleDisplayId"])
+            putNullable("virtualDisplayId", result.data["virtualDisplayId"])
+            putNullable("surfaceDisplayId", result.data["surfaceDisplayId"])
+            putNullable("taskId", result.data["taskId"])
+            putNullable("lastKnownTaskId", result.data["lastKnownTaskId"])
+            putNullable("lastKnownTaskAlive", result.data["lastKnownTaskAlive"])
+            putNullable("lastKnownTaskDisplayId", result.data["lastKnownTaskDisplayId"])
+            putNullable("lastKnownTopActivity", result.data["lastKnownTopActivity"])
+            putNullable("lastKnownTopPackage", result.data["lastKnownTopPackage"])
+            putNullable("migratedToMain", result.data["migratedToMain"])
+            putNullable("lastMigrationCode", result.data["lastMigrationCode"])
+            putNullable("lastMigrationDirection", result.data["lastMigrationDirection"])
+            putNullable("lastMigrationConflictCode", result.data["lastMigrationConflictCode"])
+            putNullable("lastMigrationConflictReason", result.data["lastMigrationConflictReason"])
+            putNullable("userForegroundTaskId", result.data["userForegroundTaskId"])
+            putNullable("recoveryNeeded", result.data["recoveryNeeded"])
+            putNullable("visibleToUser", result.data["visibleToUser"])
+            putNullable("pendingReturnToVirtualDisplay", result.data["pendingReturnToVirtualDisplay"])
+            putNullable("bootstrapTarget", result.data["bootstrapTarget"])
+            putNullable("bootstrapCode", result.data["lastBootstrapCode"])
+            putNullable("waitingQuestion", result.data["waitingQuestion"])
+            putNullable("lastError", result.data["lastError"])
         }.toString()
         pendingResult.setResultCode(if (result.ok) Activity.RESULT_OK else Activity.RESULT_CANCELED)
         pendingResult.setResultData(payload)

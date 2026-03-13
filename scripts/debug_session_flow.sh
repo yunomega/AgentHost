@@ -25,6 +25,30 @@ reply_session() {
     --es user_text "$user_text"
 }
 
+migrate_main() {
+  local session_id="${1:-}"
+  if [[ -n "$session_id" ]]; then
+    adb shell am broadcast -n "$RECV" \
+      -a "$PKG.debug.MIGRATE_TO_MAIN" \
+      --es session_id "$session_id"
+  else
+    adb shell am broadcast -n "$RECV" \
+      -a "$PKG.debug.MIGRATE_TO_MAIN"
+  fi
+}
+
+migrate_back() {
+  local session_id="${1:-}"
+  if [[ -n "$session_id" ]]; then
+    adb shell am broadcast -n "$RECV" \
+      -a "$PKG.debug.MIGRATE_TO_EXECUTION" \
+      --es session_id "$session_id"
+  else
+    adb shell am broadcast -n "$RECV" \
+      -a "$PKG.debug.MIGRATE_TO_EXECUTION"
+  fi
+}
+
 stop_session() {
   local migrate="${1:-true}"
   [[ "$migrate" == "true" || "$migrate" == "false" ]] || {
@@ -76,6 +100,8 @@ Examples:
   scripts/debug_session_flow.sh dump
   scripts/debug_session_flow.sh status
   scripts/debug_session_flow.sh reply 11111111-2222-3333-4444-555555555555 hello
+  scripts/debug_session_flow.sh migrate-main [session_id]
+  scripts/debug_session_flow.sh migrate-back [session_id]
   scripts/debug_session_flow.sh stop true
   scripts/debug_session_flow.sh logs
 EOF
@@ -102,6 +128,12 @@ main() {
       local session_id="${2:-}"
       [[ -n "$session_id" ]] || { echo "missing session_id" >&2; usage; exit 1; }
       reply_session "$session_id" "${3:-hello}"
+      ;;
+    migrate-main)
+      migrate_main "${2:-}"
+      ;;
+    migrate-back)
+      migrate_back "${2:-}"
       ;;
     stop)
       stop_session "${2:-true}"

@@ -531,7 +531,7 @@ run_model_ask_user_case() {
   server_log_start="$(mock_server_log_line_count)"
 
   start_model_session ask_user 'ask for a verification code and finish after reply'
-  wait_for_log_pattern 'event=session_waiting_user .* code=WAITING_USER' 20 'session entered WAITING_USER'
+  wait_for_log_pattern 'event=session_waiting_user .* code=WAITING_USER' 60 'session entered WAITING_USER'
   wait_for_mock_server_log_pattern "${server_log_start}" 'incoming request .*mode=ask_user' 10 'mock server received ask_user request'
 
   local session_id

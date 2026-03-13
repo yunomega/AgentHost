@@ -10,6 +10,8 @@ import com.example.agenthost.automation.AutomationHistory
 import com.example.agenthost.automation.AutomationSessionSnapshot
 import com.example.agenthost.automation.AutomationStateCallbacks
 import com.example.agenthost.automation.DisplayActionExecutor
+import com.example.agenthost.automation.ObservationRequest
+import com.example.agenthost.automation.ObservationResult
 import com.example.agenthost.automation.ObservationProvider
 import com.example.agenthost.automation.PlanningAdapter
 import com.example.agenthost.automation.PlannerSelector
@@ -19,6 +21,9 @@ import com.example.agenthost.automation.SessionAutomationEngine
 import com.example.agenthost.config.PlannerConfig
 import com.example.agenthost.debug.SessionAuditHooks
 import com.example.agenthost.migration.TaskMigrationController
+import com.example.agenthost.migration.TaskMigrationPolicy
+import com.example.agenthost.migration.TaskMigrationTarget
+import com.example.agenthost.migration.TaskValidationResult
 import com.example.agenthost.platform.AgentHostPlatformClient
 import com.example.agenthost.runtime.VirtualDisplayRuntime
 import java.util.UUID
@@ -32,11 +37,17 @@ class SessionCoordinator(
     companion object {
         private const val TAG = "SessionCoordinator"
         private const val INVALID_TASK_ID = -1
+        private const val SETTINGS_PACKAGE = "com.android.settings"
+        private const val MIGRATION_TO_MAIN = "TO_MAIN"
+        private const val MIGRATION_TO_EXECUTION = "TO_EXECUTION"
+        private const val TASK_MIGRATION_PRECHECK_OK = "TASK_MIGRATION_PRECHECK_OK"
     }
 
     private val lock = Any()
     private var activeSession: SessionState? = null
     private var activeRuntime: VirtualDisplayRuntime.RuntimeHandle? = null
+    private val migrationExcludedPackages: Set<String>
+        get() = setOf(appContext.packageName)
 
     private val automationHistory = AutomationHistory()
     private var activePlannerConfig: PlannerConfig = PlannerConfig()
@@ -89,16 +100,26 @@ class SessionCoordinator(
                         code = "WAITING_USER",
                         extras = "question=$question"
                     )
-                    if (waiting.backgroundPreferred && !waiting.visibleToUser) {
-                        val surfaced = showSessionOnMainLocked(waiting, reason = "waiting_user")
-                        waiting = if (surfaced.visibleToUser) {
-                            surfaced.copy(
-                                pendingReturnToVirtualDisplay = surfaced.returnToVirtualAfterUser
-                            )
-                        } else {
-                            surfaced
-                        }
+                    if (waiting.displayMode == SessionDisplayMode.VIRTUAL_DISPLAY) {
+                        waiting = migrateTaskToMainLocked(waiting, trigger = "waiting_user")
                         activeSession = waiting
+                        if (waiting.migratedToMain) {
+                            logInfo(
+                                event = "waiting_user_after_migration",
+                                state = waiting,
+                                step = step,
+                                actionType = "ASK_USER",
+                                code = waiting.lastMigrationCode ?: "TASK_MIGRATION_OK",
+                                extras = migrationExtras(
+                                    sourceDisplayId = waiting.executionDisplayId,
+                                    targetDisplayId = Display.DEFAULT_DISPLAY,
+                                    taskId = waiting.lastKnownTaskId,
+                                    topActivity = waiting.lastKnownTopActivity,
+                                    packageName = waiting.lastKnownTopPackage,
+                                    reason = "trigger=waiting_user"
+                                )
+                            )
+                        }
                     }
                 }
             }
@@ -216,6 +237,8 @@ class SessionCoordinator(
             sessionId = sessionId,
             command = command,
             executionDisplayId = executionDisplayId,
+            currentExecutionDisplayId = executionDisplayId,
+            currentVisibleDisplayId = executionDisplayId,
             virtualDisplayId = runtime?.vdDisplayId,
             surfaceDisplayId = if (resolvedMode == SessionDisplayMode.MAIN_DISPLAY) {
                 Display.DEFAULT_DISPLAY
@@ -223,6 +246,9 @@ class SessionCoordinator(
                 null
             },
             sessionTaskId = INVALID_TASK_ID,
+            lastKnownTaskId = INVALID_TASK_ID,
+            lastKnownTopActivity = null,
+            lastKnownTopPackage = null,
             status = SessionStatus.STARTING,
             lastError = null,
             waitingQuestion = null,
@@ -232,6 +258,9 @@ class SessionCoordinator(
             backgroundPreferred = resolvedMode != SessionDisplayMode.MAIN_DISPLAY,
             returnToVirtualAfterUser = options.returnToVirtualAfterUser,
             pendingReturnToVirtualDisplay = false,
+            migratedToMain = false,
+            lastMigrationCode = null,
+            lastMigrationDirection = null,
             bootstrapTarget = options.bootstrapTarget,
             lastBootstrapCode = null
         )
@@ -416,28 +445,78 @@ class SessionCoordinator(
             )
         }
 
-        val preResume = if (state.pendingReturnToVirtualDisplay) {
-            dismissMirrorSurfaceLocked(state, reason = "reply_received")
+        val migratedState = if (state.migratedToMain) {
+            val returned = migrateTaskBackToExecutionLocked(state, trigger = "reply_session")
+            activeSession = returned
+            if (returned.lastMigrationCode != "TASK_MIGRATION_BACK_OK") {
+                val waiting = returned.copy(
+                    status = SessionStatus.WAITING_USER,
+                    waitingQuestion = state.waitingQuestion,
+                    lastError = null,
+                    pendingReturnToVirtualDisplay = false,
+                    recoveryNeeded = true
+                )
+                activeSession = waiting
+                val failCode = if (isMigrationPrecheckFailureCode(returned.lastMigrationCode)) {
+                    "TASK_MIGRATION_PRECHECK_FAILED"
+                } else {
+                    returned.lastMigrationCode ?: "TASK_MOVE_BACK_FAILED"
+                }
+                return@synchronized failResult(
+                    code = failCode,
+                    data = stateData(waiting) + mapOf(
+                        "precheckCode" to returned.lastMigrationCode,
+                        "precheckReason" to returned.lastMigrationConflictReason
+                    )
+                )
+            }
+            refreshObservationAfterMigrationLocked(returned)
         } else {
             state
+        }
+        val preResume = if (migratedState.pendingReturnToVirtualDisplay) {
+            dismissMirrorSurfaceLocked(migratedState, reason = "reply_received")
+        } else {
+            migratedState
         }
         val running = preResume.copy(
             status = SessionStatus.RUNNING,
             waitingQuestion = null,
             lastError = null,
-            pendingReturnToVirtualDisplay = false
+            pendingReturnToVirtualDisplay = false,
+            recoveryNeeded = false
         )
         activeSession = running
         val result = automationEngine.replyToSession(sessionId, trimmed)
         return@synchronized if (result.ok) {
-            logInfo(
-                event = "automation_resumed_after_reply",
-                state = running,
-                step = running.automationStep,
-                actionType = "NONE",
-                code = "AUTOMATION_RESUMED",
-                extras = "details=${result.details}"
-            )
+            if (state.migratedToMain && running.lastMigrationCode == "TASK_MIGRATION_BACK_OK") {
+                logInfo(
+                    event = "automation_resume_after_migration",
+                    state = running,
+                    step = running.automationStep,
+                    actionType = "NONE",
+                    code = "AUTOMATION_RESUMED",
+                    extras = migrationExtras(
+                        sourceDisplayId = Display.DEFAULT_DISPLAY,
+                        targetDisplayId = running.executionDisplayId,
+                        taskId = running.lastKnownTaskId,
+                        topActivity = running.lastKnownTopActivity,
+                        packageName = running.lastKnownTopPackage,
+                        reason = "trigger=reply_session details=${result.details}",
+                        expectedTaskId = running.lastKnownTaskId,
+                        actualForegroundTaskId = running.userForegroundTaskId
+                    )
+                )
+            } else {
+                logInfo(
+                    event = "automation_resumed_after_reply",
+                    state = running,
+                    step = running.automationStep,
+                    actionType = "NONE",
+                    code = "AUTOMATION_RESUMED",
+                    extras = "details=${result.details} migrationCode=${running.lastMigrationCode ?: "null"}"
+                )
+            }
             okResult(
                 code = "AUTOMATION_RESUMED",
                 state = running,
@@ -463,6 +542,9 @@ class SessionCoordinator(
 
     fun showSessionOnMain(sessionId: String? = null): SessionResult = synchronized(lock) {
         val state = requireActiveSessionLocked(sessionId) ?: return@synchronized failResult("NO_ACTIVE_SESSION")
+        if (state.migratedToMain) {
+            return@synchronized okResult("SESSION_TASK_ALREADY_ON_MAIN", state)
+        }
         if (state.displayMode == SessionDisplayMode.MAIN_DISPLAY) {
             return@synchronized okResult("SESSION_ALREADY_ON_MAIN_DISPLAY", state)
         }
@@ -483,6 +565,15 @@ class SessionCoordinator(
         if (state.virtualDisplayId == null) {
             return@synchronized failResult("SESSION_NOT_VIRTUAL_DISPLAY", stateData(state))
         }
+        if (state.migratedToMain) {
+            val updated = migrateTaskBackToExecutionLocked(state, trigger = "debug_return_session_to_virtual")
+            activeSession = updated
+            return@synchronized if (updated.lastMigrationCode == "TASK_MIGRATION_BACK_OK") {
+                okResult("TASK_MIGRATION_BACK_OK", updated)
+            } else {
+                failResult(updated.lastMigrationCode ?: "TASK_MOVE_BACK_FAILED", stateData(updated))
+            }
+        }
         if (!state.visibleToUser || state.surfaceDisplayId == null) {
             val background = state.copy(pendingReturnToVirtualDisplay = false)
             activeSession = background
@@ -493,6 +584,40 @@ class SessionCoordinator(
         )
         activeSession = updated
         return@synchronized okResult("SESSION_RETURNED_TO_VIRTUAL", updated)
+    }
+
+    fun migrateTaskToMain(sessionId: String? = null): SessionResult = synchronized(lock) {
+        val state = requireActiveSessionLocked(sessionId) ?: return@synchronized failResult("TASK_MIGRATION_NO_ACTIVE_SESSION")
+        if (state.virtualDisplayId == null) {
+            return@synchronized failResult("TASK_MIGRATION_NOT_VIRTUAL_DISPLAY", stateData(state))
+        }
+        val updated = migrateTaskToMainLocked(state, trigger = "debug_request")
+        activeSession = updated
+        return@synchronized if (
+            updated.lastMigrationCode == "TASK_MIGRATION_OK" ||
+            updated.lastMigrationCode == "TASK_MIGRATION_ALREADY_ON_MAIN"
+        ) {
+            okResult(updated.lastMigrationCode ?: "TASK_MIGRATION_OK", updated)
+        } else {
+            failResult(updated.lastMigrationCode ?: "TASK_MOVE_FAILED", stateData(updated))
+        }
+    }
+
+    fun migrateTaskToExecution(sessionId: String? = null): SessionResult = synchronized(lock) {
+        val state = requireActiveSessionLocked(sessionId) ?: return@synchronized failResult("TASK_MIGRATION_NO_ACTIVE_SESSION")
+        if (state.virtualDisplayId == null) {
+            return@synchronized failResult("TASK_MIGRATION_NOT_VIRTUAL_DISPLAY", stateData(state))
+        }
+        val updated = migrateTaskBackToExecutionLocked(state, trigger = "debug_request")
+        activeSession = updated
+        return@synchronized if (
+            updated.lastMigrationCode == "TASK_MIGRATION_BACK_OK" ||
+            updated.lastMigrationCode == "TASK_MIGRATION_BACK_SKIPPED"
+        ) {
+            okResult(updated.lastMigrationCode ?: "TASK_MIGRATION_BACK_OK", updated)
+        } else {
+            failResult(updated.lastMigrationCode ?: "TASK_MOVE_BACK_FAILED", stateData(updated))
+        }
     }
 
     fun markRunning(sessionId: String? = null): SessionResult = synchronized(lock) {
@@ -528,7 +653,21 @@ class SessionCoordinator(
                 actionType = "NONE",
                 code = "DUMP_ACTIVE_SESSION",
                 extras = "displayMode=${state.displayMode.name} visibleToUser=${state.visibleToUser} " +
-                    "pendingReturnToVirtualDisplay=${state.pendingReturnToVirtualDisplay}"
+                    "pendingReturnToVirtualDisplay=${state.pendingReturnToVirtualDisplay} " +
+                    "currentExecutionDisplayId=${state.currentExecutionDisplayId} " +
+                    "currentVisibleDisplayId=${state.currentVisibleDisplayId ?: "null"} " +
+                    "lastMigrationCode=${state.lastMigrationCode ?: "null"} " +
+                    "lastMigrationDirection=${state.lastMigrationDirection ?: "null"} " +
+                    "lastMigrationConflictCode=${state.lastMigrationConflictCode ?: "null"} " +
+                    "lastMigrationConflictReason=${state.lastMigrationConflictReason ?: "null"} " +
+                    "migratedToMain=${state.migratedToMain} " +
+                    "lastKnownTaskId=${state.lastKnownTaskId} " +
+                    "lastKnownTaskAlive=${state.lastKnownTaskAlive ?: "null"} " +
+                    "lastKnownTaskDisplayId=${state.lastKnownTaskDisplayId ?: "null"} " +
+                    "lastKnownTopActivity=${state.lastKnownTopActivity ?: "null"} " +
+                    "lastKnownTopPackage=${state.lastKnownTopPackage ?: "null"} " +
+                    "userForegroundTaskId=${state.userForegroundTaskId ?: "null"} " +
+                    "recoveryNeeded=${state.recoveryNeeded}"
             )
             okResult(code = "DUMP_ACTIVE_SESSION", state = state)
         }
@@ -592,7 +731,7 @@ class SessionCoordinator(
                 )
                 false
             } else {
-                taskMigrationController.moveTaskToDefaultDisplay(taskId)
+                taskMigrationController.moveTaskToDisplay(taskId, Display.DEFAULT_DISPLAY)
             }
         } else {
             taskMigrationController.closeTask(taskId)
@@ -602,7 +741,7 @@ class SessionCoordinator(
             val finalStatus = if (migrate) SessionStatus.MIGRATED else SessionStatus.CLOSED
             val finalCode = if (migrate) "MIGRATED_TO_DEFAULT_DISPLAY" else "CLOSED"
             val finalState = stopping.copy(
-                executionDisplayId = if (migrate) Display.DEFAULT_DISPLAY else stopping.executionDisplayId,
+                currentVisibleDisplayId = if (migrate) Display.DEFAULT_DISPLAY else stopping.currentVisibleDisplayId,
                 surfaceDisplayId = if (migrate && stopping.displayMode == SessionDisplayMode.MAIN_DISPLAY) {
                     Display.DEFAULT_DISPLAY
                 } else {
@@ -612,7 +751,8 @@ class SessionCoordinator(
                 lastError = null,
                 waitingQuestion = null,
                 visibleToUser = migrate && stopping.displayMode == SessionDisplayMode.MAIN_DISPLAY,
-                pendingReturnToVirtualDisplay = false
+                pendingReturnToVirtualDisplay = false,
+                migratedToMain = false
             )
             activeSession = finalState
             logInfo(
@@ -634,6 +774,728 @@ class SessionCoordinator(
                 code = if (migrate) "MIGRATION_FAILED" else "CLOSE_FAILED",
                 state = stopping
             )
+        }
+    }
+
+    private fun migrateTaskToMainLocked(state: SessionState, trigger: String): SessionState {
+        if (state.virtualDisplayId == null) {
+            return state.copy(
+                lastMigrationCode = "TASK_MIGRATION_NOT_VIRTUAL_DISPLAY",
+                lastMigrationDirection = MIGRATION_TO_MAIN,
+                recoveryNeeded = false
+            )
+        }
+        if (state.migratedToMain && state.currentVisibleDisplayId == Display.DEFAULT_DISPLAY) {
+            return state.copy(
+                visibleToUser = true,
+                lastMigrationCode = "TASK_MIGRATION_ALREADY_ON_MAIN",
+                lastMigrationDirection = MIGRATION_TO_MAIN,
+                lastMigrationConflictCode = null,
+                lastMigrationConflictReason = null,
+                recoveryNeeded = false
+            )
+        }
+
+        val base = dismissMirrorSurfaceLocked(state, reason = "task_migration_to_main")
+        val mainForeground = findMainForegroundTaskLocked()
+        val actualForegroundTaskId = mainForeground?.taskId
+        val prepared = if (base.lastKnownTaskId > 0) {
+            val validation = validateBoundTask(base.lastKnownTaskId, base.executionDisplayId)
+            logMigrationPrecheck(
+                state = base,
+                code = validation.code,
+                sourceDisplayId = base.executionDisplayId,
+                targetDisplayId = Display.DEFAULT_DISPLAY,
+                expectedTaskId = base.lastKnownTaskId,
+                task = validation.target,
+                actualForegroundTaskId = validation.actualForegroundTaskId ?: actualForegroundTaskId,
+                reason = "trigger=$trigger ${validation.reason}"
+            )
+            if (!validation.ok) {
+                return buildValidationFailureState(
+                    state = base,
+                    validation = validation,
+                    direction = MIGRATION_TO_MAIN,
+                    sourceDisplayId = base.executionDisplayId,
+                    targetDisplayId = Display.DEFAULT_DISPLAY,
+                    trigger = trigger
+                )
+            }
+            rememberTaskState(
+                state = base,
+                target = validation.target!!,
+                userForegroundTaskId = validation.actualForegroundTaskId ?: actualForegroundTaskId
+            )
+        } else {
+            if (!taskMigrationController.isTaskQuerySupported()) {
+                val failed = base.copy(
+                    lastMigrationCode = "TASK_QUERY_UNSUPPORTED",
+                    lastMigrationDirection = MIGRATION_TO_MAIN,
+                    lastMigrationConflictCode = null,
+                    lastMigrationConflictReason = null,
+                    userForegroundTaskId = actualForegroundTaskId,
+                    visibleToUser = false,
+                    recoveryNeeded = true
+                )
+                logMigrationPrecheck(
+                    state = failed,
+                    code = "TASK_QUERY_UNSUPPORTED",
+                    sourceDisplayId = base.executionDisplayId,
+                    targetDisplayId = Display.DEFAULT_DISPLAY,
+                    expectedTaskId = base.lastKnownTaskId,
+                    task = null,
+                    actualForegroundTaskId = actualForegroundTaskId,
+                    reason = "trigger=$trigger reason=task_query_unsupported"
+                )
+                logError(
+                    event = "task_migration_failed",
+                    state = failed,
+                    code = "TASK_QUERY_UNSUPPORTED",
+                    extras = migrationExtras(
+                        sourceDisplayId = base.executionDisplayId,
+                        targetDisplayId = Display.DEFAULT_DISPLAY,
+                        taskId = base.lastKnownTaskId,
+                        topActivity = base.lastKnownTopActivity,
+                        packageName = base.lastKnownTopPackage,
+                        reason = "trigger=$trigger reason=task_query_unsupported",
+                        expectedTaskId = base.lastKnownTaskId,
+                        actualForegroundTaskId = actualForegroundTaskId
+                    )
+                )
+                return failed
+            }
+            val target = resolveInitialMigrationTargetLocked(base)
+            val precheckCode = if (target == null) "TARGET_TASK_NOT_FOUND" else TASK_MIGRATION_PRECHECK_OK
+            logMigrationPrecheck(
+                state = base,
+                code = precheckCode,
+                sourceDisplayId = base.executionDisplayId,
+                targetDisplayId = Display.DEFAULT_DISPLAY,
+                expectedTaskId = if (target == null) base.lastKnownTaskId else target.taskId,
+                task = target,
+                actualForegroundTaskId = actualForegroundTaskId,
+                reason = if (target == null) {
+                    "trigger=$trigger reason=target_not_found"
+                } else {
+                    "trigger=$trigger reason=target_selected"
+                }
+            )
+            if (target == null) {
+                val failed = base.copy(
+                    lastMigrationCode = "TARGET_TASK_NOT_FOUND",
+                    lastMigrationDirection = MIGRATION_TO_MAIN,
+                    lastMigrationConflictCode = null,
+                    lastMigrationConflictReason = null,
+                    userForegroundTaskId = actualForegroundTaskId,
+                    visibleToUser = false,
+                    recoveryNeeded = true
+                )
+                logError(
+                    event = "task_migration_failed",
+                    state = failed,
+                    code = "TARGET_TASK_NOT_FOUND",
+                    extras = migrationExtras(
+                        sourceDisplayId = base.executionDisplayId,
+                        targetDisplayId = Display.DEFAULT_DISPLAY,
+                        taskId = failed.lastKnownTaskId,
+                        topActivity = failed.lastKnownTopActivity,
+                        packageName = failed.lastKnownTopPackage,
+                        reason = "trigger=$trigger reason=target_not_found",
+                        expectedTaskId = failed.lastKnownTaskId,
+                        actualForegroundTaskId = actualForegroundTaskId
+                    )
+                )
+                return failed
+            }
+            rememberTaskState(
+                state = base,
+                target = target,
+                userForegroundTaskId = actualForegroundTaskId
+            )
+        }
+        val boundTarget = requireNotNull(prepared.toBoundTaskTarget())
+        if (TaskMigrationPolicy.isSamePackageDifferentTask(boundTarget, mainForeground)) {
+            val conflict = prepared.copy(
+                lastMigrationCode = "USER_OWNS_MAIN_INSTANCE",
+                lastMigrationDirection = MIGRATION_TO_MAIN,
+                lastMigrationConflictCode = "TASK_CONFLICT_ON_MAIN",
+                lastMigrationConflictReason = "same_package_different_task_on_main",
+                userForegroundTaskId = actualForegroundTaskId,
+                visibleToUser = false,
+                migratedToMain = false,
+                recoveryNeeded = true
+            )
+            logMigrationPrecheck(
+                state = conflict,
+                code = "USER_OWNS_MAIN_INSTANCE",
+                sourceDisplayId = prepared.executionDisplayId,
+                targetDisplayId = Display.DEFAULT_DISPLAY,
+                expectedTaskId = prepared.lastKnownTaskId,
+                task = boundTarget,
+                actualForegroundTaskId = actualForegroundTaskId,
+                reason = "trigger=$trigger reason=user_owns_main_instance"
+            )
+            logError(
+                event = "task_migration_conflict",
+                state = conflict,
+                code = "TASK_CONFLICT_ON_MAIN",
+                extras = migrationExtras(
+                    sourceDisplayId = prepared.executionDisplayId,
+                    targetDisplayId = Display.DEFAULT_DISPLAY,
+                    taskId = boundTarget.taskId,
+                    topActivity = boundTarget.topActivity,
+                    packageName = boundTarget.packageName,
+                    reason = "trigger=$trigger reason=user_owns_main_instance",
+                    expectedTaskId = prepared.lastKnownTaskId,
+                    actualForegroundTaskId = actualForegroundTaskId
+                )
+            )
+            return conflict
+        }
+        logInfo(
+            event = "task_migration_begin",
+            state = prepared,
+            code = "TASK_MIGRATION_BEGIN",
+            extras = migrationExtras(
+                sourceDisplayId = state.executionDisplayId,
+                targetDisplayId = Display.DEFAULT_DISPLAY,
+                taskId = boundTarget.taskId,
+                topActivity = boundTarget.topActivity,
+                packageName = boundTarget.packageName,
+                reason = "trigger=$trigger",
+                expectedTaskId = prepared.lastKnownTaskId,
+                actualForegroundTaskId = prepared.userForegroundTaskId
+            )
+        )
+
+        val success = taskMigrationController.moveTaskToDisplay(boundTarget.taskId, Display.DEFAULT_DISPLAY)
+        return if (success) {
+            val updated = prepared.copy(
+                currentVisibleDisplayId = Display.DEFAULT_DISPLAY,
+                visibleToUser = true,
+                migratedToMain = true,
+                lastMigrationCode = "TASK_MIGRATION_OK",
+                lastMigrationDirection = MIGRATION_TO_MAIN,
+                lastMigrationConflictCode = null,
+                lastMigrationConflictReason = null,
+                lastKnownTaskAlive = true,
+                lastKnownTaskDisplayId = Display.DEFAULT_DISPLAY,
+                recoveryNeeded = false
+            )
+            logInfo(
+                event = "task_migration_success",
+                state = updated,
+                code = "TASK_MIGRATION_OK",
+                extras = migrationExtras(
+                    sourceDisplayId = state.executionDisplayId,
+                    targetDisplayId = Display.DEFAULT_DISPLAY,
+                    taskId = boundTarget.taskId,
+                    topActivity = boundTarget.topActivity,
+                    packageName = boundTarget.packageName,
+                    reason = "trigger=$trigger",
+                    expectedTaskId = updated.lastKnownTaskId,
+                    actualForegroundTaskId = updated.userForegroundTaskId
+                )
+            )
+            updated
+        } else {
+            val failed = prepared.copy(
+                currentVisibleDisplayId = base.currentVisibleDisplayId,
+                visibleToUser = base.visibleToUser,
+                migratedToMain = false,
+                lastMigrationCode = "TASK_MOVE_FAILED",
+                lastMigrationDirection = MIGRATION_TO_MAIN,
+                lastMigrationConflictCode = null,
+                lastMigrationConflictReason = null,
+                recoveryNeeded = true
+            )
+            logError(
+                event = "task_migration_failed",
+                state = failed,
+                code = "TASK_MOVE_FAILED",
+                extras = migrationExtras(
+                    sourceDisplayId = state.executionDisplayId,
+                    targetDisplayId = Display.DEFAULT_DISPLAY,
+                    taskId = boundTarget.taskId,
+                    topActivity = boundTarget.topActivity,
+                    packageName = boundTarget.packageName,
+                    reason = "trigger=$trigger reason=move_failed",
+                    expectedTaskId = failed.lastKnownTaskId,
+                    actualForegroundTaskId = failed.userForegroundTaskId
+                )
+            )
+            failed
+        }
+    }
+
+    private fun migrateTaskBackToExecutionLocked(state: SessionState, trigger: String): SessionState {
+        if (state.virtualDisplayId == null) {
+            return state.copy(
+                lastMigrationCode = "TASK_MIGRATION_NOT_VIRTUAL_DISPLAY",
+                lastMigrationDirection = MIGRATION_TO_EXECUTION,
+                recoveryNeeded = false
+            )
+        }
+        if (!state.migratedToMain) {
+            return state.copy(
+                currentVisibleDisplayId = state.executionDisplayId,
+                lastMigrationCode = "TASK_MIGRATION_BACK_SKIPPED",
+                lastMigrationDirection = MIGRATION_TO_EXECUTION,
+                userForegroundTaskId = findMainForegroundTaskLocked()?.taskId ?: state.userForegroundTaskId
+            )
+        }
+        if (state.lastKnownTaskId <= 0) {
+            val failed = state.copy(
+                lastMigrationCode = "TASK_ID_STALE",
+                lastMigrationDirection = MIGRATION_TO_EXECUTION,
+                lastMigrationConflictCode = null,
+                lastMigrationConflictReason = null,
+                lastKnownTaskAlive = false,
+                recoveryNeeded = true
+            )
+            logMigrationPrecheck(
+                state = failed,
+                code = "TASK_ID_STALE",
+                sourceDisplayId = Display.DEFAULT_DISPLAY,
+                targetDisplayId = state.executionDisplayId,
+                expectedTaskId = state.lastKnownTaskId,
+                task = null,
+                actualForegroundTaskId = state.userForegroundTaskId,
+                reason = "trigger=$trigger reason=invalid_last_known_task"
+            )
+            logError(
+                event = "task_migration_task_missing",
+                state = failed,
+                code = "TASK_ID_STALE",
+                extras = migrationExtras(
+                    sourceDisplayId = Display.DEFAULT_DISPLAY,
+                    targetDisplayId = state.executionDisplayId,
+                    taskId = failed.lastKnownTaskId,
+                    topActivity = failed.lastKnownTopActivity,
+                    packageName = failed.lastKnownTopPackage,
+                    reason = "trigger=$trigger reason=invalid_last_known_task",
+                    expectedTaskId = failed.lastKnownTaskId,
+                    actualForegroundTaskId = failed.userForegroundTaskId
+                )
+            )
+            return failed
+        }
+        val validation = validateBoundTask(state.lastKnownTaskId, Display.DEFAULT_DISPLAY)
+        logMigrationPrecheck(
+            state = state,
+            code = validation.code,
+            sourceDisplayId = Display.DEFAULT_DISPLAY,
+            targetDisplayId = state.executionDisplayId,
+            expectedTaskId = state.lastKnownTaskId,
+            task = validation.target,
+            actualForegroundTaskId = validation.actualForegroundTaskId,
+            reason = "trigger=$trigger ${validation.reason}"
+        )
+        if (!validation.ok) {
+            return buildValidationFailureState(
+                state = state,
+                validation = validation,
+                direction = MIGRATION_TO_EXECUTION,
+                sourceDisplayId = Display.DEFAULT_DISPLAY,
+                targetDisplayId = state.executionDisplayId,
+                trigger = trigger
+            )
+        }
+        val validated = rememberTaskState(
+            state = state,
+            target = validation.target!!,
+            userForegroundTaskId = validation.actualForegroundTaskId
+        )
+        val mainForeground = findMainForegroundTaskLocked()
+        val boundTarget = requireNotNull(validated.toBoundTaskTarget())
+        if (TaskMigrationPolicy.isSamePackageDifferentTask(boundTarget, mainForeground)) {
+            val conflict = validated.copy(
+                lastMigrationCode = "TASK_MOVE_BACK_CONFLICT",
+                lastMigrationDirection = MIGRATION_TO_EXECUTION,
+                lastMigrationConflictCode = "TASK_MOVE_BACK_CONFLICT",
+                lastMigrationConflictReason = "same_package_different_task_on_main",
+                userForegroundTaskId = mainForeground?.taskId,
+                recoveryNeeded = true
+            )
+            logMigrationPrecheck(
+                state = conflict,
+                code = "TASK_MOVE_BACK_CONFLICT",
+                sourceDisplayId = Display.DEFAULT_DISPLAY,
+                targetDisplayId = state.executionDisplayId,
+                expectedTaskId = validated.lastKnownTaskId,
+                task = boundTarget,
+                actualForegroundTaskId = mainForeground?.taskId,
+                reason = "trigger=$trigger reason=user_owns_main_instance"
+            )
+            logError(
+                event = "task_migration_conflict",
+                state = conflict,
+                code = "TASK_MOVE_BACK_CONFLICT",
+                extras = migrationExtras(
+                    sourceDisplayId = Display.DEFAULT_DISPLAY,
+                    targetDisplayId = state.executionDisplayId,
+                    taskId = boundTarget.taskId,
+                    topActivity = boundTarget.topActivity,
+                    packageName = boundTarget.packageName,
+                    reason = "trigger=$trigger reason=user_owns_main_instance",
+                    expectedTaskId = validated.lastKnownTaskId,
+                    actualForegroundTaskId = mainForeground?.taskId
+                )
+            )
+            return conflict
+        }
+
+        logInfo(
+            event = "task_migration_back_begin",
+            state = validated,
+            code = "TASK_MIGRATION_BACK_BEGIN",
+            extras = migrationExtras(
+                sourceDisplayId = Display.DEFAULT_DISPLAY,
+                targetDisplayId = state.executionDisplayId,
+                taskId = validated.lastKnownTaskId,
+                topActivity = validated.lastKnownTopActivity,
+                packageName = validated.lastKnownTopPackage,
+                reason = "trigger=$trigger",
+                expectedTaskId = validated.lastKnownTaskId,
+                actualForegroundTaskId = validated.userForegroundTaskId
+            )
+        )
+        val success = taskMigrationController.moveTaskToDisplay(
+            validated.lastKnownTaskId,
+            validated.executionDisplayId
+        )
+        return if (success) {
+            val updated = validated.copy(
+                currentVisibleDisplayId = validated.executionDisplayId,
+                visibleToUser = validated.surfaceDisplayId == Display.DEFAULT_DISPLAY,
+                migratedToMain = false,
+                lastMigrationCode = "TASK_MIGRATION_BACK_OK",
+                lastMigrationDirection = MIGRATION_TO_EXECUTION,
+                lastMigrationConflictCode = null,
+                lastMigrationConflictReason = null,
+                lastKnownTaskAlive = true,
+                lastKnownTaskDisplayId = validated.executionDisplayId,
+                recoveryNeeded = false
+            )
+            logInfo(
+                event = "task_migration_back_success",
+                state = updated,
+                code = "TASK_MIGRATION_BACK_OK",
+                extras = migrationExtras(
+                    sourceDisplayId = Display.DEFAULT_DISPLAY,
+                    targetDisplayId = updated.executionDisplayId,
+                    taskId = updated.lastKnownTaskId,
+                    topActivity = updated.lastKnownTopActivity,
+                    packageName = updated.lastKnownTopPackage,
+                    reason = "trigger=$trigger",
+                    expectedTaskId = updated.lastKnownTaskId,
+                    actualForegroundTaskId = updated.userForegroundTaskId
+                )
+            )
+            updated
+        } else {
+            val failed = validated.copy(
+                lastMigrationCode = "TASK_MOVE_BACK_FAILED",
+                lastMigrationDirection = MIGRATION_TO_EXECUTION,
+                lastMigrationConflictCode = null,
+                lastMigrationConflictReason = null,
+                recoveryNeeded = true
+            )
+            logError(
+                event = "task_migration_back_failed",
+                state = failed,
+                code = "TASK_MOVE_BACK_FAILED",
+                extras = migrationExtras(
+                    sourceDisplayId = Display.DEFAULT_DISPLAY,
+                    targetDisplayId = failed.executionDisplayId,
+                    taskId = failed.lastKnownTaskId,
+                    topActivity = failed.lastKnownTopActivity,
+                    packageName = failed.lastKnownTopPackage,
+                    reason = "trigger=$trigger reason=move_failed",
+                    expectedTaskId = failed.lastKnownTaskId,
+                    actualForegroundTaskId = failed.userForegroundTaskId
+                )
+            )
+            failed
+        }
+    }
+
+    private fun resolveInitialMigrationTargetLocked(state: SessionState): TaskMigrationTarget? {
+        taskMigrationController.findTopTaskOnDisplay(
+            displayId = state.executionDisplayId,
+            excludedPackages = migrationExcludedPackages
+        )?.let { return it }
+        if (state.bootstrapTarget == SessionBootstrapTarget.SETTINGS) {
+            taskMigrationController.findTaskOnDisplayByPackage(
+                displayId = state.executionDisplayId,
+                packageName = SETTINGS_PACKAGE
+            )?.let { return it }
+        }
+        return null
+    }
+
+    private fun validateBoundTask(taskId: Int, expectedDisplayId: Int): TaskValidationResult {
+        val actualForegroundTaskId = findMainForegroundTaskLocked()?.taskId
+        if (taskId <= 0) {
+            return TaskValidationResult(
+                ok = false,
+                code = "TASK_ID_STALE",
+                reason = "reason=invalid_task_id",
+                actualForegroundTaskId = actualForegroundTaskId
+            )
+        }
+        if (!taskMigrationController.isTaskQuerySupported()) {
+            return TaskValidationResult(
+                ok = false,
+                code = "TASK_QUERY_UNSUPPORTED",
+                reason = "reason=query_unsupported",
+                actualForegroundTaskId = actualForegroundTaskId
+            )
+        }
+        val target = taskMigrationController.findTaskById(taskId)
+        if (target == null) {
+            return TaskValidationResult(
+                ok = false,
+                code = "TARGET_TASK_REMOVED",
+                reason = "reason=task_removed",
+                actualForegroundTaskId = actualForegroundTaskId
+            )
+        }
+        if (target.displayId != expectedDisplayId) {
+            return TaskValidationResult(
+                ok = false,
+                code = "TASK_NOT_ON_EXPECTED_DISPLAY",
+                reason = "reason=expected_display_mismatch expectedDisplayId=$expectedDisplayId actualDisplayId=${target.displayId}",
+                target = target,
+                actualForegroundTaskId = actualForegroundTaskId
+            )
+        }
+        return TaskValidationResult(
+            ok = true,
+            code = TASK_MIGRATION_PRECHECK_OK,
+            reason = "reason=bound_task_valid",
+            target = target,
+            actualForegroundTaskId = actualForegroundTaskId
+        )
+    }
+
+    private fun rememberTaskState(
+        state: SessionState,
+        target: TaskMigrationTarget,
+        userForegroundTaskId: Int? = state.userForegroundTaskId
+    ): SessionState {
+        return state.copy(
+            lastKnownTaskId = target.taskId,
+            lastKnownTopActivity = target.topActivity,
+            lastKnownTopPackage = target.packageName,
+            lastKnownTaskAlive = true,
+            lastKnownTaskDisplayId = target.displayId,
+            currentVisibleDisplayId = target.displayId,
+            userForegroundTaskId = userForegroundTaskId
+        )
+    }
+
+    private fun buildValidationFailureState(
+        state: SessionState,
+        validation: TaskValidationResult,
+        direction: String,
+        sourceDisplayId: Int,
+        targetDisplayId: Int,
+        trigger: String
+    ): SessionState {
+        val failed = state.copy(
+            currentVisibleDisplayId = validation.target?.displayId ?: state.currentVisibleDisplayId,
+            lastKnownTopActivity = validation.target?.topActivity ?: state.lastKnownTopActivity,
+            lastKnownTopPackage = validation.target?.packageName ?: state.lastKnownTopPackage,
+            lastKnownTaskAlive = validation.target != null,
+            lastKnownTaskDisplayId = validation.target?.displayId ?: state.lastKnownTaskDisplayId,
+            lastMigrationCode = validation.code,
+            lastMigrationDirection = direction,
+            lastMigrationConflictCode = null,
+            lastMigrationConflictReason = null,
+            userForegroundTaskId = validation.actualForegroundTaskId,
+            visibleToUser = validation.target?.displayId == Display.DEFAULT_DISPLAY,
+            recoveryNeeded = true
+        )
+        when (validation.code) {
+            "TARGET_TASK_REMOVED", "TASK_ID_STALE" -> {
+                logError(
+                    event = "task_migration_task_missing",
+                    state = failed,
+                    code = validation.code,
+                    extras = migrationExtras(
+                        sourceDisplayId = sourceDisplayId,
+                        targetDisplayId = targetDisplayId,
+                        taskId = failed.lastKnownTaskId,
+                        topActivity = failed.lastKnownTopActivity,
+                        packageName = failed.lastKnownTopPackage,
+                        reason = "trigger=$trigger ${validation.reason}",
+                        expectedTaskId = state.lastKnownTaskId,
+                        actualForegroundTaskId = validation.actualForegroundTaskId
+                    )
+                )
+            }
+
+            else -> {
+                logError(
+                    event = if (direction == MIGRATION_TO_MAIN) {
+                        "task_migration_failed"
+                    } else {
+                        "task_migration_back_failed"
+                    },
+                    state = failed,
+                    code = validation.code,
+                    extras = migrationExtras(
+                        sourceDisplayId = sourceDisplayId,
+                        targetDisplayId = targetDisplayId,
+                        taskId = validation.target?.taskId ?: failed.lastKnownTaskId,
+                        topActivity = failed.lastKnownTopActivity,
+                        packageName = failed.lastKnownTopPackage,
+                        reason = "trigger=$trigger ${validation.reason}",
+                        expectedTaskId = state.lastKnownTaskId,
+                        actualForegroundTaskId = validation.actualForegroundTaskId
+                    )
+                )
+            }
+        }
+        return failed
+    }
+
+    private fun findMainForegroundTaskLocked(): TaskMigrationTarget? {
+        return taskMigrationController.findTopTaskOnDisplay(
+            displayId = Display.DEFAULT_DISPLAY,
+            excludedPackages = migrationExcludedPackages
+        )
+    }
+
+    private fun refreshObservationAfterMigrationLocked(state: SessionState): SessionState {
+        val actualForegroundTaskId = findMainForegroundTaskLocked()?.taskId
+        val refreshed = state.copy(userForegroundTaskId = actualForegroundTaskId)
+        val observation = observationProvider.capture(
+            ObservationRequest(
+                sessionId = state.sessionId,
+                executionDisplayId = state.executionDisplayId,
+                sessionTaskId = state.sessionTaskId,
+                imageReader = activeRuntime?.imageReader
+            )
+        )
+        when (observation) {
+            is ObservationResult.Captured -> {
+                logInfo(
+                    event = "automation_refresh_after_migration",
+                    state = refreshed,
+                    code = "OBSERVATION_OK",
+                    extras = migrationExtras(
+                        sourceDisplayId = Display.DEFAULT_DISPLAY,
+                        targetDisplayId = state.executionDisplayId,
+                        taskId = state.lastKnownTaskId,
+                        topActivity = state.lastKnownTopActivity,
+                        packageName = state.lastKnownTopPackage,
+                        reason = "trigger=reply_session reason=fresh_observation width=${observation.width} height=${observation.height}",
+                        expectedTaskId = state.lastKnownTaskId,
+                        actualForegroundTaskId = actualForegroundTaskId,
+                        observationDisplayId = state.executionDisplayId
+                    )
+                )
+            }
+
+            is ObservationResult.Failed -> {
+                logError(
+                    event = "automation_refresh_after_migration",
+                    state = refreshed,
+                    code = observation.code,
+                    extras = migrationExtras(
+                        sourceDisplayId = Display.DEFAULT_DISPLAY,
+                        targetDisplayId = state.executionDisplayId,
+                        taskId = state.lastKnownTaskId,
+                        topActivity = state.lastKnownTopActivity,
+                        packageName = state.lastKnownTopPackage,
+                        reason = "trigger=reply_session reason=fresh_observation_failed message=${observation.message}",
+                        expectedTaskId = state.lastKnownTaskId,
+                        actualForegroundTaskId = actualForegroundTaskId,
+                        observationDisplayId = state.executionDisplayId
+                    )
+                )
+            }
+        }
+        return refreshed
+    }
+
+    private fun logMigrationPrecheck(
+        state: SessionState,
+        code: String,
+        sourceDisplayId: Int,
+        targetDisplayId: Int,
+        expectedTaskId: Int,
+        task: TaskMigrationTarget?,
+        actualForegroundTaskId: Int?,
+        reason: String
+    ) {
+        logInfo(
+            event = "task_migration_precheck",
+            state = state,
+            code = code,
+            extras = migrationExtras(
+                sourceDisplayId = sourceDisplayId,
+                targetDisplayId = targetDisplayId,
+                taskId = task?.taskId ?: expectedTaskId,
+                topActivity = task?.topActivity ?: state.lastKnownTopActivity,
+                packageName = task?.packageName ?: state.lastKnownTopPackage,
+                reason = reason,
+                expectedTaskId = expectedTaskId,
+                actualForegroundTaskId = actualForegroundTaskId
+            )
+        )
+    }
+
+    private fun isMigrationPrecheckFailureCode(code: String?): Boolean {
+        return code in setOf(
+            "TASK_CONFLICT_ON_MAIN",
+            "USER_OWNS_MAIN_INSTANCE",
+            "TARGET_TASK_REMOVED",
+            "TASK_ID_STALE",
+            "TASK_NOT_ON_EXPECTED_DISPLAY",
+            "TASK_MOVE_BACK_CONFLICT",
+            "TASK_QUERY_UNSUPPORTED",
+            "TARGET_TASK_NOT_FOUND"
+        )
+    }
+
+    private fun SessionState.toBoundTaskTarget(): TaskMigrationTarget? {
+        if (lastKnownTaskId <= 0) {
+            return null
+        }
+        return TaskMigrationTarget(
+            taskId = lastKnownTaskId,
+            displayId = lastKnownTaskDisplayId ?: (currentVisibleDisplayId ?: executionDisplayId),
+            topActivity = lastKnownTopActivity,
+            packageName = lastKnownTopPackage
+        )
+    }
+
+    private fun migrationExtras(
+        sourceDisplayId: Int,
+        targetDisplayId: Int,
+        taskId: Int,
+        topActivity: String?,
+        packageName: String?,
+        reason: String,
+        expectedTaskId: Int = taskId,
+        actualForegroundTaskId: Int? = null,
+        observationDisplayId: Int? = null
+    ): String {
+        return buildString {
+            append("expectedTaskId=").append(expectedTaskId)
+            append(" actualForegroundTaskId=").append(actualForegroundTaskId ?: -1)
+            append(" sourceDisplayId=").append(sourceDisplayId)
+            append(" targetDisplayId=").append(targetDisplayId)
+            append(" taskId=").append(taskId)
+            append(" topActivity=").append(topActivity ?: "null")
+            append(" package=").append(packageName ?: "null")
+            observationDisplayId?.let {
+                append(" observationDisplayId=").append(it)
+            }
+            append(" reason=").append(reason)
         }
     }
 
@@ -929,10 +1791,15 @@ class SessionCoordinator(
             "sessionId" to state.sessionId,
             "displayId" to state.executionDisplayId,
             "executionDisplayId" to state.executionDisplayId,
+            "currentExecutionDisplayId" to state.currentExecutionDisplayId,
+            "currentVisibleDisplayId" to state.currentVisibleDisplayId,
             "virtualDisplayId" to state.virtualDisplayId,
             "surfaceDisplayId" to state.surfaceDisplayId,
             "vdDisplayId" to state.virtualDisplayId,
             "taskId" to state.sessionTaskId,
+            "lastKnownTaskId" to state.lastKnownTaskId,
+            "lastKnownTopActivity" to state.lastKnownTopActivity,
+            "lastKnownTopPackage" to state.lastKnownTopPackage,
             "status" to state.status.name,
             "command" to state.command,
             "displayMode" to state.displayMode.name,
@@ -940,6 +1807,15 @@ class SessionCoordinator(
             "backgroundPreferred" to state.backgroundPreferred,
             "returnToVirtualAfterUser" to state.returnToVirtualAfterUser,
             "pendingReturnToVirtualDisplay" to state.pendingReturnToVirtualDisplay,
+            "migratedToMain" to state.migratedToMain,
+            "lastMigrationCode" to state.lastMigrationCode,
+            "lastMigrationDirection" to state.lastMigrationDirection,
+            "lastMigrationConflictCode" to state.lastMigrationConflictCode,
+            "lastMigrationConflictReason" to state.lastMigrationConflictReason,
+            "lastKnownTaskAlive" to state.lastKnownTaskAlive,
+            "lastKnownTaskDisplayId" to state.lastKnownTaskDisplayId,
+            "userForegroundTaskId" to state.userForegroundTaskId,
+            "recoveryNeeded" to state.recoveryNeeded,
             "bootstrapTarget" to state.bootstrapTarget.name,
             "lastBootstrapCode" to state.lastBootstrapCode,
             "lastError" to state.lastError,
@@ -1030,6 +1906,8 @@ class SessionCoordinator(
     ): String {
         val sid = sessionId ?: state?.sessionId ?: "null"
         val executionId = executionDisplayId ?: state?.executionDisplayId ?: -1
+        val currentExecutionId = state?.currentExecutionDisplayId ?: executionId
+        val currentVisibleId = state?.currentVisibleDisplayId
         val virtualId = virtualDisplayId ?: state?.virtualDisplayId
         val surfaceId = surfaceDisplayId ?: state?.surfaceDisplayId
         val tid = sessionTaskId ?: state?.sessionTaskId ?: INVALID_TASK_ID
@@ -1040,6 +1918,8 @@ class SessionCoordinator(
             append("event=").append(event)
             append(" sessionId=").append(sid)
             append(" executionDisplayId=").append(executionId)
+            append(" currentExecutionDisplayId=").append(currentExecutionId)
+            append(" currentVisibleDisplayId=").append(currentVisibleId ?: "null")
             append(" virtualDisplayId=").append(virtualId ?: "null")
             append(" surfaceDisplayId=").append(surfaceId ?: "null")
             append(" sessionTaskId=").append(tid)
