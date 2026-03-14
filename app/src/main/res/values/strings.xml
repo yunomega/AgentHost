@@ -1,3 +1,7 @@
 <resources>
     <string name="app_name">AgentHost</string>
+    <string name="overlay_presence_channel_name">AgentHost presence</string>
+    <string name="overlay_presence_channel_description">Keeps the overlay host and background session console available.</string>
+    <string name="overlay_presence_notification_title">AgentHost is running</string>
+    <string name="overlay_presence_notification_text">Overlay host and background session presence are kept available.</string>
 </resources>

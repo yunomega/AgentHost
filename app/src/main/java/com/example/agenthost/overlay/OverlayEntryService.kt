@@ -2,34 +2,71 @@ package com.example.agenthost.overlay
 
 import android.app.Service
 import android.content.Intent
+import android.content.pm.ServiceInfo
+import android.os.Handler
 import android.os.Binder
 import android.os.IBinder
+import android.os.Build
+import android.os.Looper
 import android.util.Log
+import androidx.core.app.ServiceCompat
 import com.example.agenthost.core.AgentHostRuntime
+import com.example.agenthost.session.SessionCoordinator
 import com.example.agenthost.session.SessionResult
 import java.util.concurrent.Executors
 
 class OverlayEntryService : Service() {
     companion object {
         private const val TAG = "OverlayEntryService"
+        private const val POLL_INTERVAL_MS = 500L
     }
 
     private val worker = Executors.newSingleThreadExecutor()
+    private val mainHandler = Handler(Looper.getMainLooper())
     private val binder = LocalBinder()
+    private lateinit var overlayController: OverlayController
+    private lateinit var actionDispatcher: OverlayActionDispatcher
+    private lateinit var presencePrefs: OverlayPresencePrefs
+    private var foregroundStarted = false
+    private val pollRunnable = object : Runnable {
+        override fun run() {
+            refreshOverlay()
+            mainHandler.postDelayed(this, POLL_INTERVAL_MS)
+        }
+    }
 
     inner class LocalBinder : Binder() {
         fun start(command: String): SessionResult {
-            return startWithAutomation(command)
+            return startWithAutomation(command).also { requestOverlayRefresh() }
         }
 
         fun stop(migrate: Boolean): SessionResult {
-            return AgentHostRuntime.sessionCoordinator(applicationContext).stopSession(migrate)
+            return sessionCoordinator().stopSession(migrate).also { requestOverlayRefresh() }
         }
 
         fun reply(sessionId: String, userText: String): SessionResult {
-            return AgentHostRuntime.sessionCoordinator(applicationContext)
+            return sessionCoordinator()
                 .replyToSession(sessionId, userText)
+                .also { requestOverlayRefresh() }
         }
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        presencePrefs = OverlayPresencePrefs(applicationContext)
+        ensureForegroundStarted()
+        actionDispatcher = OverlayActionDispatcher(
+            coordinatorProvider = ::sessionCoordinator,
+            executor = worker,
+            onActionComplete = ::requestOverlayRefresh
+        )
+        overlayController = OverlayController(
+            context = applicationContext,
+            stateMapper = OverlayStateMapper(),
+            actionDispatcher = actionDispatcher
+        )
+        overlayController.show()
+        mainHandler.post(pollRunnable)
     }
 
     override fun onBind(intent: Intent?): IBinder {
@@ -37,21 +74,37 @@ class OverlayEntryService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        ensureForegroundStarted()
+        val startReason = intent?.getStringExtra(OverlayActions.EXTRA_START_REASON)
+            ?: if (intent == null) {
+                OverlayActions.START_REASON_STICKY_RESTART
+            } else {
+                OverlayActions.START_REASON_UNSPECIFIED
+            }
+        overlayController.show()
         when (intent?.action) {
+            null,
+            OverlayActions.ACTION_ENSURE_OVERLAY -> {
+                presencePrefs.recordStart(startReason)
+                Log.i(TAG, "presence ensure reason=$startReason")
+                requestOverlayRefresh()
+            }
+
             OverlayActions.ACTION_START_SESSION -> {
                 val command = intent.getStringExtra(OverlayActions.EXTRA_COMMAND).orEmpty()
                 worker.execute {
                     val result = startWithAutomation(command)
                     Log.i(TAG, "start result code=${result.code} ok=${result.ok} data=${result.data}")
+                    requestOverlayRefresh()
                 }
             }
 
             OverlayActions.ACTION_STOP_SESSION -> {
                 val migrate = intent.getBooleanExtra(OverlayActions.EXTRA_MIGRATE, true)
                 worker.execute {
-                    val result = AgentHostRuntime.sessionCoordinator(applicationContext)
-                        .stopSession(migrate)
+                    val result = sessionCoordinator().stopSession(migrate)
                     Log.i(TAG, "stop result code=${result.code} ok=${result.ok} data=${result.data}")
+                    requestOverlayRefresh()
                 }
             }
 
@@ -59,9 +112,9 @@ class OverlayEntryService : Service() {
                 val sessionId = intent.getStringExtra(OverlayActions.EXTRA_SESSION_ID).orEmpty()
                 val userText = intent.getStringExtra(OverlayActions.EXTRA_USER_TEXT).orEmpty()
                 worker.execute {
-                    val result = AgentHostRuntime.sessionCoordinator(applicationContext)
-                        .replyToSession(sessionId, userText)
+                    val result = sessionCoordinator().replyToSession(sessionId, userText)
                     Log.i(TAG, "reply result code=${result.code} ok=${result.ok} data=${result.data}")
+                    requestOverlayRefresh()
                 }
             }
 
@@ -69,16 +122,52 @@ class OverlayEntryService : Service() {
                 Log.w(TAG, "onStartCommand unknown action=${intent?.action}")
             }
         }
-        return START_NOT_STICKY
+        return START_STICKY
     }
 
     override fun onDestroy() {
+        mainHandler.removeCallbacksAndMessages(null)
+        overlayController.destroy()
+        if (foregroundStarted) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+            } else {
+                @Suppress("DEPRECATION")
+                stopForeground(true)
+            }
+            foregroundStarted = false
+        }
         super.onDestroy()
         worker.shutdownNow()
     }
 
+    private fun ensureForegroundStarted() {
+        if (foregroundStarted) {
+            return
+        }
+        try {
+            OverlayNotificationHelper.ensureChannel(applicationContext)
+            val notification = OverlayNotificationHelper.buildNotification(applicationContext)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                ServiceCompat.startForeground(
+                    this,
+                    OverlayNotificationHelper.NOTIFICATION_ID,
+                    notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MANIFEST
+                )
+            } else {
+                startForeground(OverlayNotificationHelper.NOTIFICATION_ID, notification)
+            }
+            foregroundStarted = true
+            Log.i(TAG, "foreground_started")
+        } catch (t: Throwable) {
+            Log.e(TAG, "failed to start foreground service", t)
+            throw t
+        }
+    }
+
     private fun startWithAutomation(command: String): SessionResult {
-        val coordinator = AgentHostRuntime.sessionCoordinator(applicationContext)
+        val coordinator = sessionCoordinator()
         val startResult = coordinator.startSession(command)
         if (!startResult.ok) {
             return startResult
@@ -90,5 +179,17 @@ class OverlayEntryService : Service() {
                 data = startResult.data
             )
         return coordinator.startAutomation(sessionId)
+    }
+
+    private fun requestOverlayRefresh() {
+        mainHandler.post { refreshOverlay() }
+    }
+
+    private fun refreshOverlay() {
+        overlayController.render(sessionCoordinator().getActiveSession())
+    }
+
+    private fun sessionCoordinator(): SessionCoordinator {
+        return AgentHostRuntime.sessionCoordinator(applicationContext)
     }
 }

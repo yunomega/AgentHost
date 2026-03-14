@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<merge xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <TextView
+        android:id="@+id/overlay_handoff_title"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textColor="#17333A"
+        android:textSize="15sp"
+        android:textStyle="bold" />
+
+    <TextView
+        android:id="@+id/overlay_handoff_message"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        android:lineSpacingExtra="2dp"
+        android:textColor="#345059"
+        android:textSize="12sp" />
+
+    <EditText
+        android:id="@+id/overlay_handoff_input"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="10dp"
+        android:background="@android:drawable/edit_text"
+        android:imeOptions="actionDone"
+        android:inputType="text"
+        android:maxLines="1"
+        android:minHeight="40dp"
+        android:paddingHorizontal="10dp"
+        android:paddingVertical="8dp"
+        android:singleLine="true"
+        android:textColor="#1E2B33"
+        android:textColorHint="#6A7B84"
+        android:textSize="13sp" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="10dp"
+        android:gravity="end"
+        android:orientation="horizontal">
+
+        <Button
+            android:id="@+id/overlay_handoff_secondary"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:minWidth="0dp"
+            android:paddingHorizontal="14dp"
+            android:textAllCaps="false" />
+
+        <Button
+            android:id="@+id/overlay_handoff_primary"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:minWidth="0dp"
+            android:paddingHorizontal="14dp"
+            android:textAllCaps="false" />
+    </LinearLayout>
+</merge>
