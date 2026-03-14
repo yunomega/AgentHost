@@ -4,6 +4,7 @@ import com.example.agenthost.core.AgentHostLog
 import com.example.agenthost.runtime.VirtualDisplayRuntime
 import com.example.agenthost.session.SessionStatus
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
 import java.util.concurrent.atomic.AtomicBoolean
@@ -47,13 +48,13 @@ class SessionAutomationEngine(
     private val actionExecutor: DisplayActionExecutor,
     private val history: AutomationHistory,
     private val maxSteps: Int = 30,
-    private val maxActionRetries: Int = 2
+    private val maxActionRetries: Int = 2,
+    private val worker: ExecutorService = Executors.newCachedThreadPool()
 ) {
     companion object {
         private const val TAG = "SessionAutomationEngine"
     }
 
-    private val worker = Executors.newCachedThreadPool()
     private val loops = ConcurrentHashMap<String, LoopControl>()
 
     fun startAutomation(sessionId: String): EngineResult {
@@ -66,7 +67,46 @@ class SessionAutomationEngine(
         return try {
             val future = worker.submit {
                 try {
+                    Thread.interrupted()
                     runLoop(sessionId, control)
+                } catch (t: Throwable) {
+                    if (control.stopRequested.get()) {
+                        val snapshot = callbacks.getSnapshot(sessionId)
+                        log(
+                            event = "automation_stopped",
+                            sessionId = snapshot?.sessionId ?: sessionId,
+                            executionDisplayId = snapshot?.executionDisplayId ?: -1,
+                            virtualDisplayId = snapshot?.virtualDisplayId,
+                            surfaceDisplayId = snapshot?.surfaceDisplayId,
+                            sessionTaskId = snapshot?.sessionTaskId ?: -1,
+                            step = 0,
+                            actionType = "NONE",
+                            code = "STOP_REQUESTED",
+                            extras = "details=${t.message ?: t.javaClass.simpleName}"
+                        )
+                        return@submit
+                    }
+                    val snapshot = callbacks.getSnapshot(sessionId)
+                    log(
+                        event = "automation_crashed",
+                        sessionId = snapshot?.sessionId ?: sessionId,
+                        executionDisplayId = snapshot?.executionDisplayId ?: -1,
+                        virtualDisplayId = snapshot?.virtualDisplayId,
+                        surfaceDisplayId = snapshot?.surfaceDisplayId,
+                        sessionTaskId = snapshot?.sessionTaskId ?: -1,
+                        step = 0,
+                        actionType = "NONE",
+                        code = "AUTOMATION_LOOP_CRASHED",
+                        extras = "details=${t.message ?: t.javaClass.simpleName}"
+                    )
+                    snapshot?.let {
+                        callbacks.onSessionFailed(
+                            sessionId = it.sessionId,
+                            step = 0,
+                            code = "AUTOMATION_LOOP_CRASHED",
+                            details = t.message ?: t.javaClass.simpleName
+                        )
+                    }
                 } finally {
                     loops.remove(sessionId)
                 }

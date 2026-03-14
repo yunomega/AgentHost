@@ -80,12 +80,15 @@ class AgentHostPlatformClient(
     private val context: Context,
     private val captureTimeoutMs: Long = 4_000L,
     private val actionTimeoutMs: Long = 2_000L,
-    private val binderExecutor: ExecutorService = Executors.newCachedThreadPool()
+    private val binderExecutor: ExecutorService = Executors.newCachedThreadPool(),
+    private val pipeReadTimeoutMs: Long = captureTimeoutMs
 ) : PlatformAutomationGateway {
     companion object {
         private const val TAG = "AgentHostPlatformClient"
         private const val SERVICE_NAME = "agenthost_platform"
     }
+
+    private val timedInputStreamReader = TimedInputStreamReader(binderExecutor)
 
     override fun isAvailable(): Boolean = resolveService() != null
 
@@ -297,7 +300,28 @@ class AgentHostPlatformClient(
         val pngFd = result.getParcelable(PlatformBundleKeys.PNG_FD) as? ParcelFileDescriptor
         val pipeReadStartedAt = SystemClock.elapsedRealtime()
         val pngBytes = try {
-            readBytes(pngFd)
+            readBytesWithTimeout(pngFd, pipeReadTimeoutMs)
+        } catch (_: TimeoutException) {
+            val detail = buildString {
+                append("png_fd read timeout after ")
+                append(pipeReadTimeoutMs)
+                append("ms")
+            }
+            return failureCapture(
+                sessionId = sessionId,
+                displayId = displayId,
+                actionType = actionType,
+                code = PlatformResultCodes.CAPTURE_FAILED,
+                details = detail
+            )
+        } catch (_: InterruptedException) {
+            return failureCapture(
+                sessionId = sessionId,
+                displayId = displayId,
+                actionType = actionType,
+                code = PlatformResultCodes.CAPTURE_FAILED,
+                details = "png_fd read interrupted"
+            )
         } catch (t: Throwable) {
             val detail = buildString {
                 append("failed reading png_fd after ")
@@ -425,9 +449,14 @@ class AgentHostPlatformClient(
         return PlatformActionResponse(ok = false, code = code, details = details)
     }
 
-    private fun readBytes(parcelFileDescriptor: ParcelFileDescriptor?): ByteArray? {
+    private fun readBytesWithTimeout(
+        parcelFileDescriptor: ParcelFileDescriptor?,
+        timeoutMs: Long
+    ): ByteArray? {
         val fd = parcelFileDescriptor ?: return null
-        return ParcelFileDescriptor.AutoCloseInputStream(fd).use { input -> input.readBytes() }
+        return ParcelFileDescriptor.AutoCloseInputStream(fd).use { input ->
+            timedInputStreamReader.readAll(input, timeoutMs)
+        }
     }
 
     private fun <T> callWithTimeout(

@@ -2,17 +2,21 @@ package com.example.agenthost.debug
 
 import android.app.Activity
 import android.content.BroadcastReceiver
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.util.Log
 import com.example.agenthost.automation.PlanningMode
 import com.example.agenthost.config.ModelConfig
 import com.example.agenthost.config.PlannerConfig
 import com.example.agenthost.core.AgentHostRuntime
+import com.example.agenthost.security.DebugEntryAccessPolicy
 import com.example.agenthost.session.SessionBootstrapTarget
 import com.example.agenthost.session.SessionDisplayMode
-import com.example.agenthost.session.SessionStartOptions
 import com.example.agenthost.session.SessionResult
+import com.example.agenthost.session.SessionStartOptions
 import java.util.concurrent.Executors
 import org.json.JSONObject
 
@@ -39,28 +43,108 @@ class SessionAuditReceiver : BroadcastReceiver() {
         private const val EXTRA_MODEL_MAX_RETRIES = "model_max_retries"
         private const val EXTRA_MODEL_MAX_RESPONSE_CHARS = "model_max_response_chars"
         private const val EXTRA_MOCK_MODEL_RESPONSE = "mock_model_response"
+        private const val EXTRA_FAULT_DIRECTION = "fault_direction"
+        private const val EXTRA_FAULT_CODE = "fault_code"
 
         private val worker = Executors.newSingleThreadExecutor()
+        private val supportedMigrationFaults = mapOf(
+            "TO_MAIN" to setOf("TASK_ID_STALE", "TARGET_TASK_REMOVED", "TASK_CONFLICT_ON_MAIN"),
+            "TO_EXECUTION" to setOf("TASK_ID_STALE", "TARGET_TASK_REMOVED", "TASK_MOVE_BACK_CONFLICT")
+        )
+
+        @JvmStatic
+        fun emitAccessDeniedForTest(
+            action: String?,
+            decision: DebugEntryAccessPolicy.Decision
+        ): SessionResult {
+            return withAccessMetadata(buildAccessDeniedDispatch(action, decision).result, decision)
+        }
+
+        private fun buildAccessDeniedDispatch(
+            action: String?,
+            decision: DebugEntryAccessPolicy.Decision
+        ): DispatchResult {
+            Log.w(
+                TAG,
+                "event=debug_access_denied code=${decision.code} action=${action ?: "null"} " +
+                    "callerUid=${decision.callerUid ?: -1} callerPackage=${decision.callerPackage ?: "null"} " +
+                    "identitySource=${decision.identitySource} reason=${decision.reason}"
+            )
+            return DispatchResult(
+                event = "debug_access_denied",
+                result = SessionResult(
+                    ok = false,
+                    code = decision.code,
+                    data = mapOf(
+                        "action" to action,
+                        "accessReason" to decision.reason
+                    )
+                )
+            )
+        }
+
+        private fun withAccessMetadata(
+            result: SessionResult,
+            decision: DebugEntryAccessPolicy.Decision
+        ): SessionResult {
+            return result.copy(
+                data = result.data + mapOf(
+                    "accessCode" to decision.code,
+                    "accessReason" to decision.reason,
+                    "callerUid" to decision.callerUid,
+                    "callerPackage" to decision.callerPackage,
+                    "callerIdentitySource" to decision.identitySource
+                )
+            )
+        }
     }
 
+    private data class DispatchResult(
+        val event: String,
+        val result: SessionResult
+    )
+
+    private data class MethodCall<T>(
+        val value: T?,
+        val available: Boolean,
+        val failureReason: String? = null
+    )
+
     override fun onReceive(context: Context, intent: Intent?) {
+        val appContext = context.applicationContext
+        val callerIdentity = resolveCallerIdentity(appContext)
+        val accessDecision = DebugEntryAccessPolicy.evaluate(
+            callerIdentity = callerIdentity,
+            environment = DebugEntryAccessPolicy.Environment(
+                appUid = appContext.applicationInfo.uid,
+                appPackage = appContext.packageName,
+                debugHooksEnabled = SessionAuditHooks.isEnabled(),
+                deviceBuildType = Build.TYPE,
+                permissionGatedFallbackAllowed = isPermissionGatedFallbackEnabled(appContext)
+            )
+        )
         val pendingResult = goAsync()
         worker.execute {
             try {
-                handleAction(context.applicationContext, intent, pendingResult)
+                val dispatch = if (accessDecision.allowed) {
+                    handleAuthorizedAction(appContext, intent)
+                } else {
+                    buildAccessDeniedDispatch(intent?.action, accessDecision)
+                }
+                writeBroadcastResult(
+                    pendingResult = pendingResult,
+                    event = dispatch.event,
+                    result = withAccessMetadata(dispatch.result, accessDecision)
+                )
             } finally {
                 pendingResult.finish()
             }
         }
     }
 
-    private fun handleAction(
-        context: Context,
-        intent: Intent?,
-        pendingResult: PendingResult
-    ) {
+    private fun handleAuthorizedAction(context: Context, intent: Intent?): DispatchResult {
         val pkg = context.packageName
-        when (intent?.action) {
+        return when (intent?.action) {
             "$pkg.debug.START_SESSION" -> {
                 val command = intent.getStringExtra(EXTRA_COMMAND).orEmpty()
                 val skipAttach = intent.getBooleanExtra(EXTRA_SKIP_ATTACH, false)
@@ -89,7 +173,7 @@ class SessionAuditReceiver : BroadcastReceiver() {
                         "plannerMode=${plannerConfig?.mode?.name ?: "DEFAULT"} " +
                         "modelConfig=${plannerConfig?.modelConfig?.sanitizedSummary() ?: "default"}"
                 )
-                writeBroadcastResult(pendingResult, "debug_start_session", result)
+                DispatchResult(event = "debug_start_session", result = result)
             }
 
             "$pkg.debug.STOP_SESSION" -> {
@@ -102,7 +186,7 @@ class SessionAuditReceiver : BroadcastReceiver() {
                     result = result,
                     extras = "migrate=$migrate forceMigrationFail=$forceMigrationFail"
                 )
-                writeBroadcastResult(pendingResult, "debug_stop_session", result)
+                DispatchResult(event = "debug_stop_session", result = result)
             }
 
             "$pkg.debug.REPLY_SESSION" -> {
@@ -115,7 +199,7 @@ class SessionAuditReceiver : BroadcastReceiver() {
                     result = result,
                     extras = "sessionId=$sessionId userTextLength=${userText.length}"
                 )
-                writeBroadcastResult(pendingResult, "debug_reply_session", result)
+                DispatchResult(event = "debug_reply_session", result = result)
             }
 
             "$pkg.debug.MIGRATE_TO_MAIN" -> {
@@ -126,7 +210,7 @@ class SessionAuditReceiver : BroadcastReceiver() {
                     result = result,
                     extras = "sessionId=$sessionId"
                 )
-                writeBroadcastResult(pendingResult, "debug_migrate_to_main", result)
+                DispatchResult(event = "debug_migrate_to_main", result = result)
             }
 
             "$pkg.debug.MIGRATE_TO_EXECUTION" -> {
@@ -137,7 +221,7 @@ class SessionAuditReceiver : BroadcastReceiver() {
                     result = result,
                     extras = "sessionId=$sessionId"
                 )
-                writeBroadcastResult(pendingResult, "debug_migrate_to_execution", result)
+                DispatchResult(event = "debug_migrate_to_execution", result = result)
             }
 
             "$pkg.debug.DUMP_ACTIVE_SESSION" -> {
@@ -147,7 +231,7 @@ class SessionAuditReceiver : BroadcastReceiver() {
                     result = result,
                     extras = "{}"
                 )
-                writeBroadcastResult(pendingResult, "debug_dump_active_session", result)
+                DispatchResult(event = "debug_dump_active_session", result = result)
             }
 
             "$pkg.debug.SHOW_SESSION_ON_MAIN" -> {
@@ -158,7 +242,7 @@ class SessionAuditReceiver : BroadcastReceiver() {
                     result = result,
                     extras = "sessionId=$sessionId"
                 )
-                writeBroadcastResult(pendingResult, "debug_show_session_on_main", result)
+                DispatchResult(event = "debug_show_session_on_main", result = result)
             }
 
             "$pkg.debug.RETURN_SESSION_TO_VIRTUAL" -> {
@@ -169,7 +253,69 @@ class SessionAuditReceiver : BroadcastReceiver() {
                     result = result,
                     extras = "sessionId=$sessionId"
                 )
-                writeBroadcastResult(pendingResult, "debug_return_session_to_virtual", result)
+                DispatchResult(event = "debug_return_session_to_virtual", result = result)
+            }
+
+            "$pkg.debug.ARM_MIGRATION_FAULT" -> {
+                val direction = intent.getStringExtra(EXTRA_FAULT_DIRECTION).orEmpty().trim().uppercase()
+                val faultCode = intent.getStringExtra(EXTRA_FAULT_CODE).orEmpty().trim().uppercase()
+                val validationError = validateMigrationFault(direction, faultCode)
+                val result = if (validationError == null) {
+                    SessionAuditHooks.armMigrationFaultOnce(direction = direction, code = faultCode)
+                    SessionResult(
+                        ok = true,
+                        code = "DEBUG_MIGRATION_FAULT_ARMED",
+                        data = SessionAuditHooks.dumpDebugState() + mapOf(
+                            "requestedFaultDirection" to direction,
+                            "requestedFaultCode" to faultCode
+                        )
+                    )
+                } else {
+                    SessionResult(
+                        ok = false,
+                        code = "INVALID_DEBUG_MIGRATION_FAULT_REQUEST",
+                        data = mapOf(
+                            "requestedFaultDirection" to direction,
+                            "requestedFaultCode" to faultCode,
+                            "reason" to validationError
+                        )
+                    )
+                }
+                logResult(
+                    event = "debug_arm_migration_fault",
+                    result = result,
+                    extras = "direction=$direction faultCode=$faultCode"
+                )
+                DispatchResult(event = "debug_arm_migration_fault", result = result)
+            }
+
+            "$pkg.debug.CLEAR_DEBUG_HOOKS" -> {
+                SessionAuditHooks.clearDebugState()
+                val result = SessionResult(
+                    ok = true,
+                    code = "DEBUG_HOOKS_CLEARED",
+                    data = SessionAuditHooks.dumpDebugState()
+                )
+                logResult(
+                    event = "debug_clear_debug_hooks",
+                    result = result,
+                    extras = "{}"
+                )
+                DispatchResult(event = "debug_clear_debug_hooks", result = result)
+            }
+
+            "$pkg.debug.DUMP_DEBUG_HOOKS" -> {
+                val result = SessionResult(
+                    ok = true,
+                    code = "DEBUG_HOOKS_STATE",
+                    data = SessionAuditHooks.dumpDebugState()
+                )
+                logResult(
+                    event = "debug_dump_debug_hooks",
+                    result = result,
+                    extras = "{}"
+                )
+                DispatchResult(event = "debug_dump_debug_hooks", result = result)
             }
 
             else -> {
@@ -179,8 +325,152 @@ class SessionAuditReceiver : BroadcastReceiver() {
                     code = "UNKNOWN_ACTION",
                     data = mapOf("action" to intent?.action)
                 )
-                writeBroadcastResult(pendingResult, "debug_unknown_action", result)
+                DispatchResult(event = "debug_unknown_action", result = result)
             }
+        }
+    }
+
+    private fun resolveCallerIdentity(context: Context): DebugEntryAccessPolicy.CallerIdentity {
+        if (Build.VERSION.SDK_INT >= 34) {
+            val apiUid = readCallerUidApi34()
+            val apiPackage = readCallerPackageApi34()
+            val callerUid = apiUid.value?.takeIf { it >= 0 }
+            if (callerUid != null) {
+                val packageName = apiPackage.value ?: packageNameForUid(context, callerUid)
+                return DebugEntryAccessPolicy.CallerIdentity(
+                    uid = callerUid,
+                    packageName = packageName,
+                    identitySource = if (apiPackage.value != null) "api34" else "api34_uid_pm",
+                    capabilityMissing = false,
+                    failureReason = null
+                )
+            }
+            if (!apiUid.available) {
+                return resolveCallerIdentityFromReflection(context, apiUid.failureReason)
+            }
+        }
+        return resolveCallerIdentityFromReflection(context, null)
+    }
+
+    private fun resolveCallerIdentityFromReflection(
+        context: Context,
+        priorFailureReason: String?
+    ): DebugEntryAccessPolicy.CallerIdentity {
+        val reflectedUid = invokeIntMethod("getSentFromUid")
+        val reflectedPackage = invokeStringMethod("getSentFromPackage")
+        val callerUid = reflectedUid.value?.takeIf { it >= 0 }
+        if (callerUid != null) {
+            val packageName = reflectedPackage.value ?: packageNameForUid(context, callerUid)
+            return DebugEntryAccessPolicy.CallerIdentity(
+                uid = callerUid,
+                packageName = packageName,
+                identitySource = if (reflectedPackage.value != null) {
+                    "reflection"
+                } else {
+                    "reflection_uid_pm"
+                },
+                capabilityMissing = false,
+                failureReason = null
+            )
+        }
+        val capabilityMissing = !reflectedUid.available
+        val failureReason = when {
+            capabilityMissing -> reflectedUid.failureReason ?: priorFailureReason ?: "caller_identity_capability_missing"
+            reflectedUid.value != null && reflectedUid.value < 0 -> "caller_uid_invalid"
+            priorFailureReason != null -> priorFailureReason
+            else -> reflectedUid.failureReason ?: "caller_identity_unavailable"
+        }
+        return DebugEntryAccessPolicy.CallerIdentity(
+            uid = null,
+            packageName = reflectedPackage.value,
+            identitySource = if (reflectedUid.available) "reflection" else "unavailable",
+            capabilityMissing = capabilityMissing,
+            failureReason = failureReason
+        )
+    }
+
+    private fun isPermissionGatedFallbackEnabled(context: Context): Boolean {
+        return runCatching {
+            val receiverInfo = context.packageManager.getReceiverInfo(
+                ComponentName(context, SessionAuditReceiver::class.java),
+                PackageManager.GET_META_DATA
+            )
+            receiverInfo.permission == "android.permission.DUMP"
+        }.getOrDefault(false)
+    }
+
+    private fun readCallerUidApi34(): MethodCall<Int> {
+        return try {
+            MethodCall(value = getSentFromUid(), available = true)
+        } catch (t: Throwable) {
+            MethodCall(
+                value = null,
+                available = false,
+                failureReason = "api34_sent_from_uid_unavailable:${t.javaClass.simpleName}"
+            )
+        }
+    }
+
+    private fun readCallerPackageApi34(): MethodCall<String> {
+        return try {
+            MethodCall(value = getSentFromPackage(), available = true)
+        } catch (t: Throwable) {
+            MethodCall(
+                value = null,
+                available = false,
+                failureReason = "api34_sent_from_package_unavailable:${t.javaClass.simpleName}"
+            )
+        }
+    }
+
+    private fun invokeIntMethod(methodName: String): MethodCall<Int> {
+        return try {
+            val method = BroadcastReceiver::class.java.getMethod(methodName)
+            val value = method.invoke(this) as? Int
+            MethodCall(value = value, available = true)
+        } catch (t: NoSuchMethodException) {
+            MethodCall(value = null, available = false, failureReason = "${methodName}_missing")
+        } catch (t: Throwable) {
+            MethodCall(
+                value = null,
+                available = false,
+                failureReason = "${methodName}_invoke_failed:${t.javaClass.simpleName}"
+            )
+        }
+    }
+
+    private fun invokeStringMethod(methodName: String): MethodCall<String> {
+        return try {
+            val method = BroadcastReceiver::class.java.getMethod(methodName)
+            MethodCall(value = method.invoke(this) as? String, available = true)
+        } catch (t: NoSuchMethodException) {
+            MethodCall(value = null, available = false, failureReason = "${methodName}_missing")
+        } catch (t: Throwable) {
+            MethodCall(
+                value = null,
+                available = false,
+                failureReason = "${methodName}_invoke_failed:${t.javaClass.simpleName}"
+            )
+        }
+    }
+
+    private fun packageNameForUid(context: Context, uid: Int): String? {
+        return runCatching { context.packageManager.getPackagesForUid(uid)?.firstOrNull() }
+            .getOrNull()
+    }
+
+    private fun validateMigrationFault(direction: String, faultCode: String): String? {
+        if (direction.isBlank()) {
+            return "missing_fault_direction"
+        }
+        if (faultCode.isBlank()) {
+            return "missing_fault_code"
+        }
+        val supportedCodes = supportedMigrationFaults[direction] ?: return "unsupported_fault_direction"
+        return if (faultCode in supportedCodes) {
+            null
+        } else {
+            "unsupported_fault_code"
         }
     }
 
@@ -340,6 +630,36 @@ class SessionAuditReceiver : BroadcastReceiver() {
             put(key, value ?: JSONObject.NULL)
         }
 
+        val knownKeys = linkedSetOf(
+            "sessionId",
+            "status",
+            "displayMode",
+            "executionDisplayId",
+            "displayId",
+            "currentExecutionDisplayId",
+            "currentVisibleDisplayId",
+            "virtualDisplayId",
+            "surfaceDisplayId",
+            "taskId",
+            "lastKnownTaskId",
+            "lastKnownTaskAlive",
+            "lastKnownTaskDisplayId",
+            "lastKnownTopActivity",
+            "lastKnownTopPackage",
+            "migratedToMain",
+            "lastMigrationCode",
+            "lastMigrationDirection",
+            "lastMigrationConflictCode",
+            "lastMigrationConflictReason",
+            "userForegroundTaskId",
+            "recoveryNeeded",
+            "visibleToUser",
+            "pendingReturnToVirtualDisplay",
+            "bootstrapTarget",
+            "lastBootstrapCode",
+            "waitingQuestion",
+            "lastError"
+        )
         val payload = JSONObject().apply {
             put("event", event)
             put("ok", result.ok)
@@ -371,6 +691,11 @@ class SessionAuditReceiver : BroadcastReceiver() {
             putNullable("bootstrapCode", result.data["lastBootstrapCode"])
             putNullable("waitingQuestion", result.data["waitingQuestion"])
             putNullable("lastError", result.data["lastError"])
+            result.data.forEach { (key, value) ->
+                if (key !in knownKeys) {
+                    putNullable(key, value)
+                }
+            }
         }.toString()
         pendingResult.setResultCode(if (result.ok) Activity.RESULT_OK else Activity.RESULT_CANCELED)
         pendingResult.setResultData(payload)

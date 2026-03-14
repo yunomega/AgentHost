@@ -10,6 +10,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -142,6 +143,113 @@ class SessionAutomationEngineModelModeTest {
         assertNull(callbacks.waitingQuestion)
     }
 
+    @Test
+    fun nextSessionClearsStaleInterruptedWorkerState() {
+        val history = AutomationHistory()
+        val callbacks = MultiSessionCallbacks(
+            snapshots = linkedMapOf(
+                "s1" to baseSnapshot("s1", "click once"),
+                "s2" to baseSnapshot("s2", "ask for verification code")
+            )
+        )
+        val captureStarted = CountDownLatch(1)
+        val planner = object : PlanningAdapter {
+            override fun modeForSession(sessionId: String): PlanningMode = PlanningMode.MODEL
+
+            override fun planNext(request: PlanningRequest): PlanResult {
+                return when (request.sessionId) {
+                    "s2" -> {
+                        when (request.observation) {
+                            is ObservationResult.Captured -> PlanResult.PlannedAction(
+                                GuiAction.AskUser("verification code?")
+                            )
+
+                            is ObservationResult.Failed -> PlanResult.PlanFailure(
+                                code = request.observation.code,
+                                message = request.observation.message
+                            )
+                        }
+                    }
+
+                    else -> PlanResult.PlanFailure(
+                        code = "PLAN_SHOULD_NOT_RUN",
+                        message = "unexpected planner invocation"
+                    )
+                }
+            }
+
+            override fun clearSession(sessionId: String) = Unit
+        }
+        val observationProvider = object : ObservationProvider {
+            override fun capture(request: ObservationRequest): ObservationResult {
+                return when (request.sessionId) {
+                    "s1" -> {
+                        captureStarted.countDown()
+                        try {
+                            Thread.sleep(5_000)
+                        } catch (_: InterruptedException) {
+                            Thread.currentThread().interrupt()
+                            return ObservationResult.Failed(
+                                code = "STOPPED",
+                                message = "capture interrupted"
+                            )
+                        }
+                        ObservationResult.Captured(base64Png = "", width = 1080, height = 1920)
+                    }
+
+                    "s2" -> {
+                        if (Thread.currentThread().isInterrupted) {
+                            ObservationResult.Failed(
+                                code = "STALE_INTERRUPT",
+                                message = "worker interrupt flag leaked across sessions"
+                            )
+                        } else {
+                            ObservationResult.Captured(base64Png = "", width = 1080, height = 1920)
+                        }
+                    }
+
+                    else -> ObservationResult.Failed(code = "UNKNOWN_SESSION", message = request.sessionId)
+                }
+            }
+        }
+        val worker = Executors.newSingleThreadExecutor()
+        val engine = SessionAutomationEngine(
+            callbacks = callbacks,
+            observationProvider = observationProvider,
+            planningAdapter = planner,
+            actionExecutor = FakeExecutor(),
+            history = history,
+            maxSteps = 5,
+            maxActionRetries = 0,
+            worker = worker
+        )
+        try {
+            assertTrue(engine.startAutomation("s1").ok)
+            assertTrue(captureStarted.await(2, TimeUnit.SECONDS))
+            assertTrue(engine.stopAutomation("s1").ok)
+
+            callbacks.markMissing("s1")
+            assertTrue(engine.startAutomation("s2").ok)
+            assertTrue(callbacks.waitingLatch.await(2, TimeUnit.SECONDS))
+            assertEquals(SessionStatus.WAITING_USER, callbacks.status("s2"))
+        } finally {
+            worker.shutdownNow()
+        }
+    }
+
+    private fun baseSnapshot(sessionId: String, command: String): AutomationSessionSnapshot {
+        return AutomationSessionSnapshot(
+            sessionId = sessionId,
+            command = command,
+            executionDisplayId = 9,
+            virtualDisplayId = 9,
+            surfaceDisplayId = null,
+            sessionTaskId = 21,
+            status = SessionStatus.RUNNING,
+            runtimeHandle = null
+        )
+    }
+
     private class TestCallbacks(
         sessionId: String,
         command: String
@@ -196,6 +304,51 @@ class SessionAutomationEngineModelModeTest {
         }
 
         fun status(): SessionStatus = synchronized(lock) { snapshot.status }
+    }
+
+    private class MultiSessionCallbacks(
+        snapshots: Map<String, AutomationSessionSnapshot>
+    ) : AutomationStateCallbacks {
+        private val lock = Any()
+        private val snapshots = snapshots.toMutableMap()
+
+        val waitingLatch = CountDownLatch(1)
+
+        override fun getSnapshot(sessionId: String): AutomationSessionSnapshot? = synchronized(lock) {
+            snapshots[sessionId]
+        }
+
+        override fun onSessionWaitingUser(sessionId: String, step: Int, question: String) {
+            synchronized(lock) {
+                val snapshot = snapshots[sessionId] ?: return
+                snapshots[sessionId] = snapshot.copy(status = SessionStatus.WAITING_USER)
+            }
+            waitingLatch.countDown()
+        }
+
+        override fun onSessionCompleted(sessionId: String, step: Int, reason: String) {
+            synchronized(lock) {
+                val snapshot = snapshots[sessionId] ?: return
+                snapshots[sessionId] = snapshot.copy(status = SessionStatus.COMPLETED)
+            }
+        }
+
+        override fun onSessionFailed(sessionId: String, step: Int, code: String, details: String) {
+            synchronized(lock) {
+                val snapshot = snapshots[sessionId] ?: return
+                snapshots[sessionId] = snapshot.copy(status = SessionStatus.FAILED)
+            }
+        }
+
+        fun markMissing(sessionId: String) {
+            synchronized(lock) {
+                snapshots.remove(sessionId)
+            }
+        }
+
+        fun status(sessionId: String): SessionStatus? = synchronized(lock) {
+            snapshots[sessionId]?.status
+        }
     }
 
     private class FakeExecutor : DisplayActionExecutor {

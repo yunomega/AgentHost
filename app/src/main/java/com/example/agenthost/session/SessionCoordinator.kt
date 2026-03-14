@@ -914,6 +914,15 @@ class SessionCoordinator(
             )
         }
         val boundTarget = requireNotNull(prepared.toBoundTaskTarget())
+        maybeInjectDebugMigrationFault(
+            state = prepared,
+            direction = MIGRATION_TO_MAIN,
+            sourceDisplayId = prepared.executionDisplayId,
+            targetDisplayId = Display.DEFAULT_DISPLAY,
+            trigger = trigger,
+            boundTarget = boundTarget,
+            actualForegroundTaskId = prepared.userForegroundTaskId
+        )?.let { return it }
         if (TaskMigrationPolicy.isSamePackageDifferentTask(boundTarget, mainForeground)) {
             val conflict = prepared.copy(
                 lastMigrationCode = "USER_OWNS_MAIN_INSTANCE",
@@ -1106,6 +1115,15 @@ class SessionCoordinator(
             target = validation.target!!,
             userForegroundTaskId = validation.actualForegroundTaskId
         )
+        maybeInjectDebugMigrationFault(
+            state = validated,
+            direction = MIGRATION_TO_EXECUTION,
+            sourceDisplayId = Display.DEFAULT_DISPLAY,
+            targetDisplayId = validated.executionDisplayId,
+            trigger = trigger,
+            boundTarget = requireNotNull(validated.toBoundTaskTarget()),
+            actualForegroundTaskId = validation.actualForegroundTaskId
+        )?.let { return it }
         val mainForeground = findMainForegroundTaskLocked()
         val boundTarget = requireNotNull(validated.toBoundTaskTarget())
         if (TaskMigrationPolicy.isSamePackageDifferentTask(boundTarget, mainForeground)) {
@@ -1293,6 +1311,113 @@ class SessionCoordinator(
             currentVisibleDisplayId = target.displayId,
             userForegroundTaskId = userForegroundTaskId
         )
+    }
+
+    private fun maybeInjectDebugMigrationFault(
+        state: SessionState,
+        direction: String,
+        sourceDisplayId: Int,
+        targetDisplayId: Int,
+        trigger: String,
+        boundTarget: TaskMigrationTarget,
+        actualForegroundTaskId: Int?
+    ): SessionState? {
+        val fault = SessionAuditHooks.consumeMigrationFault(direction) ?: return null
+        logInfo(
+            event = "debug_migration_fault_injected",
+            state = state,
+            code = fault.code,
+            extras = migrationExtras(
+                sourceDisplayId = sourceDisplayId,
+                targetDisplayId = targetDisplayId,
+                taskId = boundTarget.taskId,
+                topActivity = boundTarget.topActivity,
+                packageName = boundTarget.packageName,
+                reason = "trigger=$trigger reason=debug_injected_fault",
+                expectedTaskId = state.lastKnownTaskId,
+                actualForegroundTaskId = actualForegroundTaskId
+            ) + " direction=$direction"
+        )
+        return when (fault.code) {
+            "TASK_ID_STALE", "TARGET_TASK_REMOVED" -> buildValidationFailureState(
+                state = state,
+                validation = TaskValidationResult(
+                    ok = false,
+                    code = fault.code,
+                    reason = "reason=debug_injected_fault",
+                    actualForegroundTaskId = actualForegroundTaskId
+                ),
+                direction = direction,
+                sourceDisplayId = sourceDisplayId,
+                targetDisplayId = targetDisplayId,
+                trigger = "$trigger fault=${fault.code}"
+            )
+
+            "TASK_CONFLICT_ON_MAIN", "TASK_MOVE_BACK_CONFLICT" -> {
+                val conflict = state.copy(
+                    lastMigrationCode = fault.code,
+                    lastMigrationDirection = direction,
+                    lastMigrationConflictCode = fault.code,
+                    lastMigrationConflictReason = "debug_injected_fault",
+                    userForegroundTaskId = actualForegroundTaskId,
+                    visibleToUser = if (direction == MIGRATION_TO_MAIN) false else state.visibleToUser,
+                    migratedToMain = if (direction == MIGRATION_TO_MAIN) false else state.migratedToMain,
+                    recoveryNeeded = true
+                )
+                logMigrationPrecheck(
+                    state = conflict,
+                    code = fault.code,
+                    sourceDisplayId = sourceDisplayId,
+                    targetDisplayId = targetDisplayId,
+                    expectedTaskId = state.lastKnownTaskId,
+                    task = boundTarget,
+                    actualForegroundTaskId = actualForegroundTaskId,
+                    reason = "trigger=$trigger reason=debug_injected_fault"
+                )
+                logError(
+                    event = "task_migration_conflict",
+                    state = conflict,
+                    code = fault.code,
+                    extras = migrationExtras(
+                        sourceDisplayId = sourceDisplayId,
+                        targetDisplayId = targetDisplayId,
+                        taskId = boundTarget.taskId,
+                        topActivity = boundTarget.topActivity,
+                        packageName = boundTarget.packageName,
+                        reason = "trigger=$trigger reason=debug_injected_fault",
+                        expectedTaskId = state.lastKnownTaskId,
+                        actualForegroundTaskId = actualForegroundTaskId
+                    )
+                )
+                conflict
+            }
+
+            else -> {
+                val failed = state.copy(
+                    lastMigrationCode = "INVALID_DEBUG_MIGRATION_FAULT",
+                    lastMigrationDirection = direction,
+                    lastMigrationConflictCode = null,
+                    lastMigrationConflictReason = null,
+                    recoveryNeeded = true
+                )
+                logError(
+                    event = "task_migration_failed",
+                    state = failed,
+                    code = "INVALID_DEBUG_MIGRATION_FAULT",
+                    extras = migrationExtras(
+                        sourceDisplayId = sourceDisplayId,
+                        targetDisplayId = targetDisplayId,
+                        taskId = boundTarget.taskId,
+                        topActivity = boundTarget.topActivity,
+                        packageName = boundTarget.packageName,
+                        reason = "trigger=$trigger reason=invalid_debug_fault faultCode=${fault.code}",
+                        expectedTaskId = state.lastKnownTaskId,
+                        actualForegroundTaskId = actualForegroundTaskId
+                    )
+                )
+                failed
+            }
+        }
     }
 
     private fun buildValidationFailureState(

@@ -4,6 +4,7 @@
         <receiver
             android:name="com.example.agenthost.debug.SessionAuditReceiver"
             android:enabled="true"
-            android:exported="true" />
+            android:exported="true"
+            android:permission="android.permission.DUMP" />
     </application>
 </manifest>
