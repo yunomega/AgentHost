@@ -1,9 +1,11 @@
 package com.example.agenthost.overlay
 
-import com.example.agenthost.migration.TaskMigrationPolicy
-import com.example.agenthost.session.SessionDisplayMode
 import com.example.agenthost.session.SessionState
 import com.example.agenthost.session.SessionStatus
+import com.example.agenthost.migration.TaskMigrationPolicy
+import com.example.agenthost.session.PostCompletionDisposition
+import com.example.agenthost.session.PostCompletionState
+import com.example.agenthost.session.SessionDisplayMode
 
 class OverlayStateMapper {
     fun map(session: SessionState?): OverlayUiState {
@@ -14,8 +16,14 @@ class OverlayStateMapper {
                 bubbleDetail = "无活动会话",
                 bubbleTone = BubbleTone.IDLE,
                 title = "当前空闲",
-                message = "主屏保持给用户使用，AgentHost 暂无后台任务。"
+                message = "主屏保持给用户使用，AgentHost 暂无后台任务。",
+                newTaskEntryState = NewTaskEntryState.AVAILABLE,
+                newTaskMessage = "当前空闲，可直接发起新的后台任务。"
             )
+        }
+
+        if (session.status == SessionStatus.COMPLETED) {
+            return mapCompleted(session)
         }
 
         if (session.recoveryNeeded ||
@@ -46,9 +54,64 @@ class OverlayStateMapper {
             bubbleTone = BubbleTone.RUNNING,
             title = "后台执行中",
             message = "主屏不接管真实任务，只有明确 handoff 时才会提示你接手。",
+            newTaskEntryState = NewTaskEntryState.BLOCKED,
+            newTaskMessage = "当前已有任务在执行或处理中，完成或取消后再发起新任务。",
             alreadyOnMain = session.displayMode == SessionDisplayMode.MAIN_DISPLAY,
             isVirtualDisplaySession = session.displayMode == SessionDisplayMode.VIRTUAL_DISPLAY,
             lastMigrationCode = session.lastMigrationCode
+        )
+    }
+
+    private fun mapCompleted(session: SessionState): OverlayUiState {
+        val resultCode = session.postCompletionResultCode ?: session.lastMigrationCode
+        val disposition = when (session.postCompletionDisposition) {
+            PostCompletionDisposition.RETURN_TASK_TO_MAIN -> PostCompletionDisposition.RETURN_TASK_TO_MAIN
+            else -> PostCompletionDisposition.CLEANUP_IMMEDIATELY
+        }
+        val succeeded = session.postCompletionState == PostCompletionState.SUCCEEDED
+        val returnedToMain = disposition == PostCompletionDisposition.RETURN_TASK_TO_MAIN && succeeded
+        val bubbleDetail = when {
+            returnedToMain -> "已回主屏"
+            disposition == PostCompletionDisposition.RETURN_TASK_TO_MAIN -> "已安全结束"
+            else -> "会话已清理"
+        }
+        val message = buildString {
+            when {
+                returnedToMain -> {
+                    append("任务已完成，目标任务已迁回主屏。")
+                }
+
+                disposition == PostCompletionDisposition.RETURN_TASK_TO_MAIN -> {
+                    append("任务已完成，但未能将目标任务迁回主屏。会话已安全结束。")
+                }
+
+                else -> {
+                    append("任务已完成，后台会话已清理。")
+                }
+            }
+            resultCode
+                ?.takeIf {
+                    disposition == PostCompletionDisposition.RETURN_TASK_TO_MAIN && !returnedToMain
+                }
+                ?.let {
+                    append("\n失败码: ").append(it)
+                }
+        }
+        return OverlayUiState(
+            mode = OverlayMode.POST_COMPLETION,
+            sessionId = session.sessionId,
+            bubbleText = "已完成",
+            bubbleDetail = bubbleDetail,
+            bubbleTone = BubbleTone.IDLE,
+            title = "任务已完成",
+            message = message,
+            primaryLabel = if (returnedToMain) "查看主屏" else "知道了",
+            secondaryLabel = "收起",
+            newTaskEntryState = NewTaskEntryState.AVAILABLE,
+            newTaskMessage = "上一项任务已结束，可直接发起新任务。",
+            alreadyOnMain = returnedToMain || session.isOnMainDisplay(),
+            isVirtualDisplaySession = session.displayMode == SessionDisplayMode.VIRTUAL_DISPLAY,
+            lastMigrationCode = resultCode
         )
     }
 
@@ -101,12 +164,14 @@ class OverlayStateMapper {
     }
 
     private fun mapRecovery(session: SessionState): OverlayUiState {
+        val alreadyOnMain = OverlayRecoverySupport.isAlreadyOnMain(session)
+        val fallbackToIdle = OverlayRecoverySupport.shouldFallbackToIdle(session)
         val message = buildString {
             append(
-                if (session.migratedToMain) {
-                    "任务切换出现异常，当前真实任务仍在主屏。"
-                } else {
-                    "后台任务状态异常，需要人工确认后再继续。"
+                when {
+                    fallbackToIdle -> "后台任务目标已失效，当前无法恢复到原任务。返回空闲后重新发起。"
+                    session.migratedToMain -> "任务切换出现异常，当前真实任务仍在主屏。"
+                    else -> "后台任务状态异常，需要人工确认后再继续。"
                 }
             )
             session.lastMigrationCode?.let {
@@ -117,8 +182,10 @@ class OverlayStateMapper {
                 ?.let { append("\n原因: ").append(it) }
         }
         val primaryLabel = when {
+            fallbackToIdle -> "返回空闲"
             session.displayMode != SessionDisplayMode.VIRTUAL_DISPLAY -> "继续处理"
             session.migratedToMain -> "返回后台执行"
+            alreadyOnMain -> "继续处理"
             else -> "去主屏处理"
         }
         return OverlayUiState(
@@ -131,7 +198,7 @@ class OverlayStateMapper {
             message = message,
             primaryLabel = primaryLabel,
             secondaryLabel = "取消任务",
-            alreadyOnMain = session.migratedToMain || session.displayMode == SessionDisplayMode.MAIN_DISPLAY,
+            alreadyOnMain = alreadyOnMain,
             isVirtualDisplaySession = session.displayMode == SessionDisplayMode.VIRTUAL_DISPLAY,
             lastMigrationCode = session.lastMigrationCode
         )
@@ -139,7 +206,6 @@ class OverlayStateMapper {
 
     private companion object {
         val TERMINAL_STATUSES = setOf(
-            SessionStatus.COMPLETED,
             SessionStatus.CLOSED,
             SessionStatus.MIGRATED
         )

@@ -45,6 +45,7 @@ class SessionAuditReceiver : BroadcastReceiver() {
         private const val EXTRA_MOCK_MODEL_RESPONSE = "mock_model_response"
         private const val EXTRA_FAULT_DIRECTION = "fault_direction"
         private const val EXTRA_FAULT_CODE = "fault_code"
+        private const val EXTRA_ENABLED = "enabled"
 
         private val worker = Executors.newSingleThreadExecutor()
         private val supportedMigrationFaults = mapOf(
@@ -232,6 +233,36 @@ class SessionAuditReceiver : BroadcastReceiver() {
                     extras = "{}"
                 )
                 DispatchResult(event = "debug_dump_active_session", result = result)
+            }
+
+            "$pkg.debug.SET_TASK_REPORTING" -> {
+                val enabled = intent.getBooleanExtra(EXTRA_ENABLED, false)
+                TaskRunReportHooks.setReportEnabled(context, enabled)
+                val result = SessionResult(
+                    ok = true,
+                    code = "TASK_REPORTING_UPDATED",
+                    data = TaskRunReportHooks.dumpConfig(context) + mapOf("requestedEnabled" to enabled)
+                )
+                logResult(
+                    event = "debug_set_task_reporting",
+                    result = result,
+                    extras = "enabled=$enabled"
+                )
+                DispatchResult(event = "debug_set_task_reporting", result = result)
+            }
+
+            "$pkg.debug.DUMP_TASK_REPORTING" -> {
+                val result = SessionResult(
+                    ok = true,
+                    code = "TASK_REPORTING_STATE",
+                    data = TaskRunReportHooks.dumpConfig(context)
+                )
+                logResult(
+                    event = "debug_dump_task_reporting",
+                    result = result,
+                    extras = "{}"
+                )
+                DispatchResult(event = "debug_dump_task_reporting", result = result)
             }
 
             "$pkg.debug.SHOW_SESSION_ON_MAIN" -> {
@@ -480,6 +511,7 @@ class SessionAuditReceiver : BroadcastReceiver() {
         options: SessionStartOptions
     ): SessionResult {
         val coordinator = AgentHostRuntime.sessionCoordinator(context)
+        TaskRunReportHooks.prepareNextSessionSource("DEBUG")
         val startResult = coordinator.startSession(command, options)
         if (!startResult.ok) {
             return startResult

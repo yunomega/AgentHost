@@ -1,6 +1,7 @@
 package com.example.agenthost.session
 
 import android.view.Display
+import com.example.agenthost.config.PlannerConfig
 
 enum class SessionDisplayMode {
     AUTO,
@@ -13,12 +14,33 @@ enum class SessionBootstrapTarget {
     SETTINGS
 }
 
+enum class CompletionReturnPolicy {
+    CURRENT_BEHAVIOR,
+    RETURN_TASK_TO_MAIN
+}
+
+enum class PostCompletionDisposition {
+    NONE,
+    CLEANUP_IMMEDIATELY,
+    RETURN_TASK_TO_MAIN,
+    SHOW_POST_COMPLETION_ENTRY
+}
+
+enum class PostCompletionState {
+    NONE,
+    PENDING,
+    SUCCEEDED,
+    FALLBACK_CLEANUP
+}
+
 data class SessionStartOptions(
     val displayMode: SessionDisplayMode = SessionDisplayMode.AUTO,
     val visibleToUser: Boolean = false,
     val returnToVirtualAfterUser: Boolean = true,
+    val completionReturnPolicy: CompletionReturnPolicy = CompletionReturnPolicy.CURRENT_BEHAVIOR,
     val debugForceMainDisplay: Boolean = false,
-    val bootstrapTarget: SessionBootstrapTarget = SessionBootstrapTarget.NONE
+    val bootstrapTarget: SessionBootstrapTarget = SessionBootstrapTarget.NONE,
+    val plannerConfigOverride: PlannerConfig? = null
 ) {
     fun resolvedDisplayMode(): SessionDisplayMode {
         return when {
@@ -49,6 +71,7 @@ data class SessionState(
     val visibleToUser: Boolean,
     val backgroundPreferred: Boolean,
     val returnToVirtualAfterUser: Boolean,
+    val completionReturnPolicy: CompletionReturnPolicy,
     val pendingReturnToVirtualDisplay: Boolean,
     val migratedToMain: Boolean,
     val lastMigrationCode: String?,
@@ -60,7 +83,10 @@ data class SessionState(
     val userForegroundTaskId: Int? = null,
     val recoveryNeeded: Boolean = false,
     val bootstrapTarget: SessionBootstrapTarget,
-    val lastBootstrapCode: String?
+    val lastBootstrapCode: String?,
+    val postCompletionDisposition: PostCompletionDisposition = PostCompletionDisposition.NONE,
+    val postCompletionState: PostCompletionState = PostCompletionState.NONE,
+    val postCompletionResultCode: String? = null
 ) {
     fun isOnMainDisplay(): Boolean = currentVisibleDisplayId == Display.DEFAULT_DISPLAY
 }

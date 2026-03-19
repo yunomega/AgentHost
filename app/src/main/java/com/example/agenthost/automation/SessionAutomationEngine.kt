@@ -1,13 +1,9 @@
 package com.example.agenthost.automation
 
-import android.graphics.Bitmap
-import android.graphics.BitmapFactory
-import android.graphics.Color
 import com.example.agenthost.core.AgentHostLog
 import com.example.agenthost.debug.TaskRunReportHooks
 import com.example.agenthost.runtime.VirtualDisplayRuntime
 import com.example.agenthost.session.SessionStatus
-import java.util.Base64
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -28,106 +24,15 @@ fun interface InitialObservationRetryPolicy {
 }
 
 private object ObservationBitmapUtils {
-    private const val TARGET_MAX_SAMPLE_DIMENSION = 24
-    private const val MAX_BLACK_LUMA = 12
-    private const val MAX_SETTLE_MEAN_LUMA_DIFF = 6.0
-
     fun isLikelyNearBlackSingleColorFrame(observation: ObservationResult.Captured): Boolean {
-        val bitmap = tryDecodeBitmap(observation) ?: return false
-        return try {
-            if (bitmap.width <= 0 || bitmap.height <= 0) {
-                return false
-            }
-            val firstColor = bitmap.getPixel(0, 0)
-            if (luma(firstColor) > MAX_BLACK_LUMA) {
-                return false
-            }
-            for (y in 0 until bitmap.height) {
-                for (x in 0 until bitmap.width) {
-                    val color = bitmap.getPixel(x, y)
-                    if (color != firstColor || luma(color) > MAX_BLACK_LUMA) {
-                        return false
-                    }
-                }
-            }
-            true
-        } finally {
-            bitmap.recycle()
-        }
+        return ObservationChangeDetector.isLikelyNearBlackSingleColorFrame(observation)
     }
 
     fun areNearlyUnchanged(
         before: ObservationResult.Captured,
         after: ObservationResult.Captured
     ): Boolean {
-        if (before.width != after.width || before.height != after.height) {
-            return false
-        }
-        val beforeBitmap = tryDecodeBitmap(before)
-        val afterBitmap = tryDecodeBitmap(after)
-        if (beforeBitmap == null || afterBitmap == null) {
-            beforeBitmap?.recycle()
-            afterBitmap?.recycle()
-            return before.base64Png == after.base64Png
-        }
-        return try {
-            if (beforeBitmap.width != afterBitmap.width || beforeBitmap.height != afterBitmap.height) {
-                return false
-            }
-            val pixelCount = beforeBitmap.width * beforeBitmap.height
-            if (pixelCount <= 0) {
-                return before.base64Png == after.base64Png
-            }
-            var totalDiff = 0L
-            for (y in 0 until beforeBitmap.height) {
-                for (x in 0 until beforeBitmap.width) {
-                    totalDiff += kotlin.math.abs(
-                        luma(beforeBitmap.getPixel(x, y)) - luma(afterBitmap.getPixel(x, y))
-                    )
-                }
-            }
-            val meanDiff = totalDiff.toDouble() / pixelCount.toDouble()
-            meanDiff <= MAX_SETTLE_MEAN_LUMA_DIFF
-        } finally {
-            beforeBitmap.recycle()
-            afterBitmap.recycle()
-        }
-    }
-
-    private fun tryDecodeBitmap(observation: ObservationResult.Captured): Bitmap? {
-        return try {
-            val pngBytes = Base64.getDecoder().decode(observation.base64Png)
-            if (pngBytes.isEmpty()) {
-                return null
-            }
-            BitmapFactory.decodeByteArray(
-                pngBytes,
-                0,
-                pngBytes.size,
-                BitmapFactory.Options().apply {
-                    inPreferredConfig = Bitmap.Config.ARGB_8888
-                    inSampleSize = calculateSampleSize(observation.width, observation.height)
-                }
-            )
-        } catch (_: Throwable) {
-            null
-        }
-    }
-
-    private fun calculateSampleSize(width: Int, height: Int): Int {
-        val maxDimension = maxOf(width, height)
-        if (maxDimension <= TARGET_MAX_SAMPLE_DIMENSION) {
-            return 1
-        }
-        var sampleSize = 1
-        while (maxDimension / sampleSize > TARGET_MAX_SAMPLE_DIMENSION) {
-            sampleSize *= 2
-        }
-        return sampleSize
-    }
-
-    private fun luma(color: Int): Int {
-        return (Color.red(color) * 299 + Color.green(color) * 587 + Color.blue(color) * 114) / 1000
+        return ObservationChangeDetector.areNearlyUnchanged(before, after)
     }
 }
 

@@ -6,6 +6,23 @@ import org.junit.Test
 
 class TaskMigrationPolicyTest {
     @Test
+    fun completionReturnSuccessRecognizesOnlyConfirmedMainMigrationCodes() {
+        assertTrue(TaskMigrationPolicy.isCompletionReturnSuccess("TASK_MIGRATION_OK"))
+        assertTrue(TaskMigrationPolicy.isCompletionReturnSuccess("TASK_MIGRATION_ALREADY_ON_MAIN"))
+        assertFalse(TaskMigrationPolicy.isCompletionReturnSuccess("TARGET_TASK_NOT_FOUND"))
+        assertFalse(TaskMigrationPolicy.isCompletionReturnSuccess("TASK_MOVE_FAILED"))
+        assertFalse(TaskMigrationPolicy.isCompletionReturnSuccess(null))
+    }
+
+    @Test
+    fun completionReturnFallbackTreatsMissingOrFailedMigrationAsTerminalCleanup() {
+        assertFalse(TaskMigrationPolicy.shouldCompletionFallbackToCleanup("TASK_MIGRATION_OK"))
+        assertTrue(TaskMigrationPolicy.shouldCompletionFallbackToCleanup("TARGET_TASK_REMOVED"))
+        assertTrue(TaskMigrationPolicy.shouldCompletionFallbackToCleanup("TASK_MOVE_FAILED"))
+        assertTrue(TaskMigrationPolicy.shouldCompletionFallbackToCleanup(null))
+    }
+
+    @Test
     fun requiresRecoveryIsTrueForConflictAndTaskLossCodes() {
         assertTrue(TaskMigrationPolicy.requiresRecovery("USER_OWNS_MAIN_INSTANCE"))
         assertTrue(TaskMigrationPolicy.requiresRecovery("TASK_MOVE_BACK_CONFLICT"))

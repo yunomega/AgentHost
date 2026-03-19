@@ -20,6 +20,7 @@ import com.example.agenthost.automation.PlatformObservationProvider
 import com.example.agenthost.automation.SessionAutomationEngine
 import com.example.agenthost.config.PlannerConfig
 import com.example.agenthost.debug.SessionAuditHooks
+import com.example.agenthost.debug.TaskRunReportHooks
 import com.example.agenthost.migration.TaskMigrationController
 import com.example.agenthost.migration.TaskMigrationPolicy
 import com.example.agenthost.migration.TaskMigrationTarget
@@ -28,12 +29,16 @@ import com.example.agenthost.platform.AgentHostPlatformClient
 import com.example.agenthost.runtime.VirtualDisplayRuntime
 import java.util.UUID
 
+fun interface SessionStateListener {
+    fun onSessionChanged(session: SessionState?)
+}
+
 class SessionCoordinator(
     private val appContext: Context,
     private val virtualDisplayRuntime: VirtualDisplayRuntime,
     private val taskMigrationController: TaskMigrationController,
     private val attachTimeoutMs: Long = 8_000L
-) {
+) : OverlaySessionGateway {
     companion object {
         private const val TAG = "SessionCoordinator"
         private const val INVALID_TASK_ID = -1
@@ -44,7 +49,13 @@ class SessionCoordinator(
     }
 
     private val lock = Any()
+    private val sessionStateListeners = linkedSetOf<SessionStateListener>()
+    private var lastSessionListenerSnapshot: SessionStateListenerSnapshot? = null
     private var activeSession: SessionState? = null
+        set(value) {
+            field = value
+            notifySessionStateListenersIfNeeded(value)
+        }
     private var activeRuntime: VirtualDisplayRuntime.RuntimeHandle? = null
     private val migrationExcludedPackages: Set<String>
         get() = setOf(appContext.packageName)
@@ -55,6 +66,7 @@ class SessionCoordinator(
         synchronized(lock) { activePlannerConfig }
     }
     private val platformGateway = AgentHostPlatformClient(appContext)
+    private val executionDisplayPolicySync = ExecutionDisplayPolicySync(platformGateway)
     private val observationProvider: ObservationProvider = PlatformObservationProvider(platformGateway)
     private val actionExecutor: DisplayActionExecutor = PlatformDisplayActionExecutor(platformGateway)
     private val automationEngine: SessionAutomationEngine = SessionAutomationEngine(
@@ -69,24 +81,35 @@ class SessionCoordinator(
                         sessionId = state.sessionId,
                         command = state.command,
                         executionDisplayId = state.executionDisplayId,
+                        currentVisibleDisplayId = state.currentVisibleDisplayId,
                         virtualDisplayId = state.virtualDisplayId,
                         surfaceDisplayId = state.surfaceDisplayId,
                         sessionTaskId = state.sessionTaskId,
                         status = state.status,
+                        lastKnownTopActivity = state.lastKnownTopActivity,
+                        lastKnownTopPackage = state.lastKnownTopPackage,
                         runtimeHandle = activeRuntime
                     )
                 }
             }
 
-            override fun onSessionWaitingUser(sessionId: String, step: Int, question: String) {
-                synchronized(lock) {
-                    val state = activeSession ?: return
-                    if (state.sessionId != sessionId || state.status != SessionStatus.RUNNING) {
-                        return
-                    }
-                    var waiting = state.copy(
-                        status = SessionStatus.WAITING_USER,
-                        waitingQuestion = question,
+	            override fun onSessionWaitingUser(sessionId: String, step: Int, question: String) {
+	                synchronized(lock) {
+	                    val state = activeSession ?: return
+	                    if (state.sessionId != sessionId || state.status != SessionStatus.RUNNING) {
+	                        return
+	                    }
+                    logInfo(
+                        event = "session_waiting_user_transition_begin",
+                        state = state,
+                        step = step,
+                        actionType = "ASK_USER",
+                        code = "WAITING_USER_BEGIN",
+                        extras = "question=$question"
+                    )
+	                    var waiting = state.copy(
+	                        status = SessionStatus.WAITING_USER,
+	                        waitingQuestion = question,
                         automationStep = step,
                         lastError = null,
                         pendingReturnToVirtualDisplay = false
@@ -101,6 +124,11 @@ class SessionCoordinator(
                         extras = "question=$question"
                     )
                     if (waiting.displayMode == SessionDisplayMode.VIRTUAL_DISPLAY) {
+                        syncExecutionDisplayPolicyStateLocked(
+                            waiting,
+                            policyState = ExecutionDisplayPolicySync.STATE_USER_HANDOFF,
+                            reason = "waiting_user"
+                        )
                         waiting = migrateTaskToMainLocked(waiting, trigger = "waiting_user")
                         activeSession = waiting
                         if (waiting.migratedToMain) {
@@ -124,22 +152,39 @@ class SessionCoordinator(
                 }
             }
 
-            override fun onSessionCompleted(sessionId: String, step: Int, reason: String) {
-                synchronized(lock) {
-                    val state = activeSession ?: return
-                    if (state.sessionId != sessionId || state.status != SessionStatus.RUNNING) {
-                        return
-                    }
-                    val completed = dismissMirrorSurfaceLocked(
-                        state.copy(
-                            status = SessionStatus.COMPLETED,
+	            override fun onSessionCompleted(sessionId: String, step: Int, reason: String) {
+	                synchronized(lock) {
+	                    val state = activeSession ?: return
+	                    if (state.sessionId != sessionId || state.status != SessionStatus.RUNNING) {
+	                        return
+	                    }
+                    logInfo(
+                        event = "session_completion_begin",
+                        state = state,
+                        step = step,
+                        actionType = "DONE",
+                        code = "COMPLETION_BEGIN",
+                        extras = "reason=$reason"
+                    )
+	                    var completed = dismissMirrorSurfaceLocked(
+	                        state.copy(
+	                            status = SessionStatus.COMPLETED,
                             waitingQuestion = null,
                             automationStep = step,
                             lastError = null,
-                            pendingReturnToVirtualDisplay = false
+                            pendingReturnToVirtualDisplay = false,
+                            postCompletionDisposition = resolvePostCompletionDisposition(state),
+                            postCompletionState = PostCompletionState.PENDING,
+                            postCompletionResultCode = null
                         ),
                         reason = "session_completed"
                     )
+                    syncExecutionDisplayPolicyStateLocked(
+                        completed,
+                        policyState = ExecutionDisplayPolicySync.STATE_COMPLETED,
+                        reason = "session_completed reason=$reason"
+                    )
+                    completed = applyCompletionReturnPolicyLocked(completed, reason = reason)
                     activeSession = completed
                     logInfo(
                         event = "session_completed",
@@ -149,8 +194,30 @@ class SessionCoordinator(
                         code = "COMPLETED",
                         extras = "reason=$reason"
                     )
-                }
-            }
+                    // Finalize the report before releasing session state so the last completed
+                    // snapshot remains available to report generation.
+	                    TaskRunReportHooks.finalizeRun(
+	                        sessionId = completed.sessionId,
+	                        finalState = completed.status.name,
+                        finalOutcome = "success",
+	                        activeSessionResidual = false,
+	                        finalCode = "COMPLETED"
+	                    )
+	                    cleanupCompletedSessionLocked(completed.sessionId)
+                    logInfo(
+                        event = "session_completion_cleanup_end",
+                        sessionId = completed.sessionId,
+                        executionDisplayId = completed.executionDisplayId,
+                        virtualDisplayId = completed.virtualDisplayId,
+                        surfaceDisplayId = completed.surfaceDisplayId,
+                        sessionTaskId = completed.sessionTaskId,
+                        step = step,
+                        actionType = "DONE",
+                        code = "COMPLETION_CLEANUP_END",
+                        extras = "reason=$reason"
+                    )
+	                }
+	            }
 
             override fun onSessionFailed(sessionId: String, step: Int, code: String, details: String) {
                 synchronized(lock) {
@@ -183,6 +250,13 @@ class SessionCoordinator(
                         code = code,
                         extras = "details=$details"
                     )
+                    TaskRunReportHooks.finalizeRun(
+                        sessionId = failed.sessionId,
+                        finalState = failed.status.name,
+                        finalOutcome = "failed",
+                        activeSessionResidual = true,
+                        finalCode = code
+                    )
                 }
             }
         },
@@ -213,8 +287,23 @@ class SessionCoordinator(
                 "returnToVirtualAfterUser=${options.returnToVirtualAfterUser} " +
                 "bootstrapTarget=${options.bootstrapTarget.name}"
         )
+        TaskRunReportHooks.onSessionCreated(
+            context = appContext,
+            sessionId = sessionId,
+            task = command,
+            displayMode = resolvedMode.name,
+            bootstrapTarget = options.bootstrapTarget.name,
+            plannerMode = options.plannerConfigOverride?.mode?.name ?: "DEFAULT"
+        )
 
         if (resolvedMode == SessionDisplayMode.VIRTUAL_DISPLAY && !supportsSecondaryDisplays()) {
+            TaskRunReportHooks.finalizeRun(
+                sessionId = sessionId,
+                finalState = SessionStatus.FAILED.name,
+                finalOutcome = "failed",
+                activeSessionResidual = false,
+                finalCode = "SECONDARY_DISPLAY_UNSUPPORTED"
+            )
             return@synchronized failResult("SECONDARY_DISPLAY_UNSUPPORTED")
         }
 
@@ -227,7 +316,8 @@ class SessionCoordinator(
             virtualDisplayRuntime.create()
                 ?: return@synchronized failAndCleanupLocked(
                     code = "VD_CREATE_FAILED",
-                    state = null
+                    state = null,
+                    reportSessionId = sessionId
                 )
         } else {
             null
@@ -257,6 +347,7 @@ class SessionCoordinator(
             visibleToUser = resolvedMode == SessionDisplayMode.MAIN_DISPLAY,
             backgroundPreferred = resolvedMode != SessionDisplayMode.MAIN_DISPLAY,
             returnToVirtualAfterUser = options.returnToVirtualAfterUser,
+            completionReturnPolicy = options.completionReturnPolicy,
             pendingReturnToVirtualDisplay = false,
             migratedToMain = false,
             lastMigrationCode = null,
@@ -285,9 +376,13 @@ class SessionCoordinator(
             code = "DISPLAY_MODE_SELECTED",
             extras = "displayMode=${resolvedMode.name} executionDisplayId=$executionDisplayId"
         )
+        syncExecutionDisplayPolicyRegistrationLocked(state, reason = "session_start")
 
         val debugStartInjection = SessionAuditHooks.consumeStartInjection()
-        activePlannerConfig = debugStartInjection.plannerConfigOverride ?: PlannerConfig()
+        activePlannerConfig = options.plannerConfigOverride
+            ?: debugStartInjection.plannerConfigOverride
+            ?: PlannerConfig()
+        TaskRunReportHooks.updatePlannerMode(sessionId, activePlannerConfig.mode.name)
         val launch = launchPrimaryRootLocked(state, debugStartInjection)
         if (!launch.ok) {
             return@synchronized failAndCleanupLocked(code = launch.code, state = state)
@@ -419,11 +514,18 @@ class SessionCoordinator(
                 code = result.code,
                 extras = "details=${result.details}"
             )
+            TaskRunReportHooks.finalizeRun(
+                sessionId = failed.sessionId,
+                finalState = failed.status.name,
+                finalOutcome = "failed",
+                activeSessionResidual = true,
+                finalCode = result.code
+            )
             failResult(result.code, stateData(failed) + mapOf("details" to result.details))
         }
     }
 
-    fun replyToSession(sessionId: String, userText: String): SessionResult = synchronized(lock) {
+    override fun replyToSession(sessionId: String, userText: String): SessionResult = synchronized(lock) {
         val state = activeSession ?: return@synchronized failResult("NO_ACTIVE_SESSION")
         if (state.sessionId != sessionId) {
             return@synchronized failResult(
@@ -470,6 +572,11 @@ class SessionCoordinator(
                     )
                 )
             }
+            syncExecutionDisplayPolicyStateLocked(
+                returned,
+                policyState = ExecutionDisplayPolicySync.STATE_EXECUTION,
+                reason = "reply_session"
+            )
             refreshObservationAfterMigrationLocked(returned)
         } else {
             state
@@ -536,11 +643,18 @@ class SessionCoordinator(
                 code = result.code,
                 extras = "details=${result.details}"
             )
+            TaskRunReportHooks.finalizeRun(
+                sessionId = failed.sessionId,
+                finalState = failed.status.name,
+                finalOutcome = "failed",
+                activeSessionResidual = true,
+                finalCode = result.code
+            )
             failResult(result.code, stateData(failed) + mapOf("details" to result.details))
         }
     }
 
-    fun showSessionOnMain(sessionId: String? = null): SessionResult = synchronized(lock) {
+    override fun showSessionOnMain(sessionId: String?): SessionResult = synchronized(lock) {
         val state = requireActiveSessionLocked(sessionId) ?: return@synchronized failResult("NO_ACTIVE_SESSION")
         if (state.migratedToMain) {
             return@synchronized okResult("SESSION_TASK_ALREADY_ON_MAIN", state)
@@ -586,7 +700,7 @@ class SessionCoordinator(
         return@synchronized okResult("SESSION_RETURNED_TO_VIRTUAL", updated)
     }
 
-    fun migrateTaskToMain(sessionId: String? = null): SessionResult = synchronized(lock) {
+    override fun migrateTaskToMain(sessionId: String?): SessionResult = synchronized(lock) {
         val state = requireActiveSessionLocked(sessionId) ?: return@synchronized failResult("TASK_MIGRATION_NO_ACTIVE_SESSION")
         if (state.virtualDisplayId == null) {
             return@synchronized failResult("TASK_MIGRATION_NOT_VIRTUAL_DISPLAY", stateData(state))
@@ -603,7 +717,7 @@ class SessionCoordinator(
         }
     }
 
-    fun migrateTaskToExecution(sessionId: String? = null): SessionResult = synchronized(lock) {
+    override fun migrateTaskToExecution(sessionId: String?): SessionResult = synchronized(lock) {
         val state = requireActiveSessionLocked(sessionId) ?: return@synchronized failResult("TASK_MIGRATION_NO_ACTIVE_SESSION")
         if (state.virtualDisplayId == null) {
             return@synchronized failResult("TASK_MIGRATION_NOT_VIRTUAL_DISPLAY", stateData(state))
@@ -626,7 +740,7 @@ class SessionCoordinator(
         startAutomation(targetSessionId)
     }
 
-    fun stopSession(migrate: Boolean): SessionResult = synchronized(lock) {
+    override fun stopSession(migrate: Boolean): SessionResult = synchronized(lock) {
         stopSessionLocked(migrate = migrate, preemptive = false)
     }
 
@@ -673,7 +787,25 @@ class SessionCoordinator(
         }
     }
 
-    fun getActiveSession(): SessionState? = synchronized(lock) { activeSession }
+    override fun getActiveSession(): SessionState? = synchronized(lock) { activeSession }
+
+    fun addSessionStateListener(
+        listener: SessionStateListener,
+        emitCurrent: Boolean = true
+    ) {
+        synchronized(lock) {
+            sessionStateListeners += listener
+            if (emitCurrent) {
+                listener.onSessionChanged(activeSession)
+            }
+        }
+    }
+
+    fun removeSessionStateListener(listener: SessionStateListener) {
+        synchronized(lock) {
+            sessionStateListeners.remove(listener)
+        }
+    }
 
     private fun stopSessionLocked(migrate: Boolean, preemptive: Boolean): SessionResult {
         val state = activeSession ?: return failResult("NO_ACTIVE_SESSION")
@@ -766,6 +898,13 @@ class SessionCoordinator(
                 code = finalCode,
                 state = finalState,
                 extra = mapOf("migrate" to migrate)
+            )
+            TaskRunReportHooks.finalizeRun(
+                sessionId = finalState.sessionId,
+                finalState = finalState.status.name,
+                finalOutcome = "interrupted",
+                activeSessionResidual = false,
+                finalCode = finalCode
             )
             cleanupLocked(stopping.sessionId)
             result
@@ -889,6 +1028,21 @@ class SessionCoordinator(
                     userForegroundTaskId = actualForegroundTaskId,
                     visibleToUser = false,
                     recoveryNeeded = true
+                )
+                logError(
+                    event = "target_task_not_found",
+                    state = failed,
+                    code = "TARGET_TASK_NOT_FOUND",
+                    extras = migrationExtras(
+                        sourceDisplayId = base.executionDisplayId,
+                        targetDisplayId = Display.DEFAULT_DISPLAY,
+                        taskId = failed.lastKnownTaskId,
+                        topActivity = failed.lastKnownTopActivity,
+                        packageName = failed.lastKnownTopPackage,
+                        reason = "trigger=$trigger reason=target_not_found",
+                        expectedTaskId = failed.lastKnownTaskId,
+                        actualForegroundTaskId = actualForegroundTaskId
+                    )
                 )
                 logError(
                     event = "task_migration_failed",
@@ -1442,6 +1596,26 @@ class SessionCoordinator(
             visibleToUser = validation.target?.displayId == Display.DEFAULT_DISPLAY,
             recoveryNeeded = true
         )
+        if (validation.code == "TARGET_TASK_REMOVED" ||
+            validation.code == "TASK_NOT_ON_EXPECTED_DISPLAY" ||
+            validation.code == "TASK_ID_STALE"
+        ) {
+            logError(
+                event = "execution_target_monitor_triggered",
+                state = failed,
+                code = validation.code,
+                extras = migrationExtras(
+                    sourceDisplayId = sourceDisplayId,
+                    targetDisplayId = targetDisplayId,
+                    taskId = validation.target?.taskId ?: failed.lastKnownTaskId,
+                    topActivity = failed.lastKnownTopActivity,
+                    packageName = failed.lastKnownTopPackage,
+                    reason = "trigger=$trigger ${validation.reason}",
+                    expectedTaskId = state.lastKnownTaskId,
+                    actualForegroundTaskId = validation.actualForegroundTaskId
+                )
+            )
+        }
         when (validation.code) {
             "TARGET_TASK_REMOVED", "TASK_ID_STALE" -> {
                 logError(
@@ -1832,7 +2006,11 @@ class SessionCoordinator(
         }
     }
 
-    private fun failAndCleanupLocked(code: String, state: SessionState?): SessionResult {
+    private fun failAndCleanupLocked(
+        code: String,
+        state: SessionState?,
+        reportSessionId: String? = state?.sessionId
+    ): SessionResult {
         if (state != null) {
             val failedBase = dismissMirrorSurfaceLocked(state, reason = "fail_cleanup")
             val failedState = failedBase.copy(
@@ -1849,6 +2027,13 @@ class SessionCoordinator(
                 actionType = "NONE",
                 code = code
             )
+            TaskRunReportHooks.finalizeRun(
+                sessionId = failedState.sessionId,
+                finalState = failedState.status.name,
+                finalOutcome = "failed",
+                activeSessionResidual = false,
+                finalCode = code
+            )
             cleanupLocked(state.sessionId)
             return failResult(code = code, data = stateData(failedState))
         }
@@ -1864,10 +2049,49 @@ class SessionCoordinator(
             actionType = "NONE",
             code = code
         )
+        reportSessionId?.let {
+            TaskRunReportHooks.finalizeRun(
+                sessionId = it,
+                finalState = SessionStatus.FAILED.name,
+                finalOutcome = "failed",
+                activeSessionResidual = false,
+                finalCode = code
+            )
+        }
         return failResult(code = code)
     }
 
+    private fun cleanupCompletedSessionLocked(sessionId: String) {
+        val state = activeSession
+        logInfo(
+            event = "session_completion_cleanup_begin",
+            state = state,
+            sessionId = sessionId,
+            step = state?.automationStep ?: 0,
+            actionType = "DONE",
+            code = "COMPLETION_CLEANUP_BEGIN"
+        )
+        state?.let {
+            syncExecutionDisplayPolicyClearLocked(
+                it,
+                reason = "completion_cleanup"
+            )
+        }
+        SessionSurfaceRegistry.finish(sessionId)
+        SessionBridge.clear(sessionId)
+        automationEngine.finishSession(sessionId)
+        activePlannerConfig = PlannerConfig()
+        activeRuntime?.release()
+        activeRuntime = null
+        activeSession = null
+    }
+
     private fun cleanupLocked(sessionId: String?) {
+        activeSession?.let { state ->
+            if (sessionId == null || sessionId == state.sessionId) {
+                syncExecutionDisplayPolicyClearLocked(state, reason = "cleanup")
+            }
+        }
         sessionId?.let {
             SessionSurfaceRegistry.finish(it)
             SessionBridge.clear(it)
@@ -1877,6 +2101,101 @@ class SessionCoordinator(
         activeRuntime?.release()
         activeRuntime = null
         activeSession = null
+    }
+
+    private fun syncExecutionDisplayPolicyRegistrationLocked(
+        state: SessionState,
+        reason: String
+    ) {
+        if (!executionDisplayPolicySync.shouldManage(state)) {
+            return
+        }
+        val response = executionDisplayPolicySync.register(state)
+        if (response.ok) {
+            logInfo(
+                event = "execution_display_policy_register_synced",
+                state = state,
+                code = response.code,
+                extras = "reason=$reason details=${response.details}"
+            )
+        } else {
+            logError(
+                event = "execution_display_policy_register_failed",
+                state = state,
+                code = response.code,
+                extras = "reason=$reason details=${response.details}"
+            )
+        }
+    }
+
+    private fun syncExecutionDisplayPolicyStateLocked(
+        state: SessionState,
+        policyState: String,
+        reason: String
+    ) {
+        if (!executionDisplayPolicySync.shouldManage(state)) {
+            return
+        }
+        val response = when (policyState) {
+            ExecutionDisplayPolicySync.STATE_EXECUTION ->
+                executionDisplayPolicySync.markExecution(state, reason)
+
+            ExecutionDisplayPolicySync.STATE_USER_HANDOFF ->
+                executionDisplayPolicySync.markUserHandoff(state, reason)
+
+            ExecutionDisplayPolicySync.STATE_COMPLETED ->
+                executionDisplayPolicySync.markCompleted(state, reason)
+
+            else -> {
+                logError(
+                    event = "execution_display_policy_state_failed",
+                    state = state,
+                    code = "EXECUTION_POLICY_STATE_UNSUPPORTED",
+                    extras = "policyState=$policyState reason=$reason"
+                )
+                return
+            }
+        }
+        if (response.ok) {
+            logInfo(
+                event = "execution_display_policy_state_synced",
+                state = state,
+                code = response.code,
+                extras = "policyState=$policyState reason=$reason details=${response.details}"
+            )
+        } else {
+            logError(
+                event = "execution_display_policy_state_failed",
+                state = state,
+                code = response.code,
+                extras = "policyState=$policyState reason=$reason details=${response.details}"
+            )
+        }
+    }
+
+    private fun syncExecutionDisplayPolicyClearLocked(
+        state: SessionState,
+        reason: String
+    ) {
+        if (!executionDisplayPolicySync.shouldManage(state)) {
+            return
+        }
+        val response = executionDisplayPolicySync.clear(state, reason)
+        if (response.ok) {
+            logInfo(
+                event = "execution_display_policy_clear_synced",
+                state = state,
+                code = response.code,
+                extras = "reason=$reason details=${response.details}"
+            )
+        } else {
+            logError(
+                event = "execution_display_policy_clear_failed",
+                state = state,
+                code = response.code,
+                extras = "reason=$reason details=${response.details}"
+            )
+        }
     }
 
     private fun supportsSecondaryDisplays(): Boolean {
@@ -1914,6 +2233,7 @@ class SessionCoordinator(
     private fun stateData(state: SessionState): Map<String, Any?> {
         return mapOf(
             "sessionId" to state.sessionId,
+            "activeSessionId" to activeSession?.sessionId,
             "displayId" to state.executionDisplayId,
             "executionDisplayId" to state.executionDisplayId,
             "currentExecutionDisplayId" to state.currentExecutionDisplayId,
@@ -1922,6 +2242,7 @@ class SessionCoordinator(
             "surfaceDisplayId" to state.surfaceDisplayId,
             "vdDisplayId" to state.virtualDisplayId,
             "taskId" to state.sessionTaskId,
+            "targetTaskId" to state.lastKnownTaskId,
             "lastKnownTaskId" to state.lastKnownTaskId,
             "lastKnownTopActivity" to state.lastKnownTopActivity,
             "lastKnownTopPackage" to state.lastKnownTopPackage,
@@ -1931,6 +2252,7 @@ class SessionCoordinator(
             "visibleToUser" to state.visibleToUser,
             "backgroundPreferred" to state.backgroundPreferred,
             "returnToVirtualAfterUser" to state.returnToVirtualAfterUser,
+            "completionReturnPolicy" to state.completionReturnPolicy.name,
             "pendingReturnToVirtualDisplay" to state.pendingReturnToVirtualDisplay,
             "migratedToMain" to state.migratedToMain,
             "lastMigrationCode" to state.lastMigrationCode,
@@ -1943,11 +2265,115 @@ class SessionCoordinator(
             "recoveryNeeded" to state.recoveryNeeded,
             "bootstrapTarget" to state.bootstrapTarget.name,
             "lastBootstrapCode" to state.lastBootstrapCode,
+            "postCompletionDisposition" to state.postCompletionDisposition.name,
+            "postCompletionState" to state.postCompletionState.name,
+            "postCompletionResultCode" to state.postCompletionResultCode,
             "lastError" to state.lastError,
             "waitingQuestion" to state.waitingQuestion,
             "automationStep" to state.automationStep,
             "plannerMode" to activePlannerConfig.mode.name,
             "actionType" to "NONE"
+        )
+    }
+
+    private fun resolvePostCompletionDisposition(state: SessionState): PostCompletionDisposition {
+        return when {
+            state.completionReturnPolicy == CompletionReturnPolicy.RETURN_TASK_TO_MAIN &&
+                state.displayMode == SessionDisplayMode.VIRTUAL_DISPLAY &&
+                state.virtualDisplayId != null -> PostCompletionDisposition.RETURN_TASK_TO_MAIN
+
+            else -> PostCompletionDisposition.CLEANUP_IMMEDIATELY
+        }
+    }
+
+    private fun normalizeCompletedPostActionState(
+        state: SessionState,
+        disposition: PostCompletionDisposition,
+        resultCode: String,
+        success: Boolean
+    ): SessionState {
+        return state.copy(
+            waitingQuestion = null,
+            lastError = null,
+            pendingReturnToVirtualDisplay = false,
+            recoveryNeeded = false,
+            visibleToUser = if (success) state.visibleToUser else false,
+            migratedToMain = if (success) state.migratedToMain else false,
+            postCompletionDisposition = disposition,
+            postCompletionState = if (success) {
+                PostCompletionState.SUCCEEDED
+            } else {
+                PostCompletionState.FALLBACK_CLEANUP
+            },
+            postCompletionResultCode = resultCode
+        )
+    }
+
+    private fun applyCompletionReturnPolicyLocked(
+        state: SessionState,
+        reason: String
+    ): SessionState {
+        if (state.postCompletionDisposition == PostCompletionDisposition.SHOW_POST_COMPLETION_ENTRY) {
+            return normalizeCompletedPostActionState(
+                state = state,
+                disposition = PostCompletionDisposition.SHOW_POST_COMPLETION_ENTRY,
+                resultCode = "POST_COMPLETION_ENTRY_RESERVED",
+                success = true
+            )
+        }
+        if (state.postCompletionDisposition != PostCompletionDisposition.RETURN_TASK_TO_MAIN) {
+            return normalizeCompletedPostActionState(
+                state = state,
+                disposition = PostCompletionDisposition.CLEANUP_IMMEDIATELY,
+                resultCode = "COMPLETION_CLEANUP_READY",
+                success = true
+            )
+        }
+        logInfo(
+            event = "session_completed_return_to_main_begin",
+            state = state,
+            step = state.automationStep,
+            actionType = "DONE",
+            code = "RETURN_TASK_TO_MAIN_BEGIN",
+            extras = "reason=$reason"
+        )
+        val migrated = migrateTaskToMainLocked(state, trigger = "session_completed")
+        val code = migrated.lastMigrationCode ?: "TASK_MIGRATION_SKIPPED"
+        val extras = migrationExtras(
+            sourceDisplayId = state.executionDisplayId,
+            targetDisplayId = Display.DEFAULT_DISPLAY,
+            taskId = migrated.lastKnownTaskId,
+            topActivity = migrated.lastKnownTopActivity,
+            packageName = migrated.lastKnownTopPackage,
+            reason = "trigger=session_completed taskReason=$reason",
+            expectedTaskId = migrated.lastKnownTaskId,
+            actualForegroundTaskId = migrated.userForegroundTaskId
+        )
+        val success = TaskMigrationPolicy.isCompletionReturnSuccess(code)
+        if (success) {
+            logInfo(
+                event = "session_completed_return_to_main",
+                state = migrated,
+                step = migrated.automationStep,
+                actionType = "DONE",
+                code = code,
+                extras = extras
+            )
+        } else {
+            logError(
+                event = "session_completed_return_to_main_failed",
+                state = migrated,
+                step = migrated.automationStep,
+                actionType = "DONE",
+                code = code,
+                extras = extras
+            )
+        }
+        return normalizeCompletedPostActionState(
+            state = migrated,
+            disposition = PostCompletionDisposition.RETURN_TASK_TO_MAIN,
+            resultCode = code,
+            success = success
         )
     }
 
@@ -1979,6 +2405,13 @@ class SessionCoordinator(
                 code = code,
                 extras = extras
             )
+        )
+        TaskRunReportHooks.onSessionEvent(
+            event = event,
+            code = code,
+            state = state,
+            sessionId = sessionId,
+            step = step
         )
     }
 
@@ -2014,6 +2447,13 @@ class SessionCoordinator(
         } else {
             Log.e(TAG, logLine, error)
         }
+        TaskRunReportHooks.onSessionEvent(
+            event = event,
+            code = code,
+            state = state,
+            sessionId = sessionId,
+            step = step
+        )
     }
 
     private fun buildLogLine(
@@ -2030,31 +2470,81 @@ class SessionCoordinator(
         extras: String?
     ): String {
         val sid = sessionId ?: state?.sessionId ?: "null"
+        val activeState = activeSession
         val executionId = executionDisplayId ?: state?.executionDisplayId ?: -1
-        val currentExecutionId = state?.currentExecutionDisplayId ?: executionId
-        val currentVisibleId = state?.currentVisibleDisplayId
-        val virtualId = virtualDisplayId ?: state?.virtualDisplayId
-        val surfaceId = surfaceDisplayId ?: state?.surfaceDisplayId
+        val currentExecutionId = state?.currentExecutionDisplayId
+            ?: activeState?.currentExecutionDisplayId
+            ?: executionId
+        val currentVisibleId = state?.currentVisibleDisplayId ?: activeState?.currentVisibleDisplayId
+        val virtualId = virtualDisplayId ?: state?.virtualDisplayId ?: activeState?.virtualDisplayId
+        val surfaceId = surfaceDisplayId ?: state?.surfaceDisplayId ?: activeState?.surfaceDisplayId
         val tid = sessionTaskId ?: state?.sessionTaskId ?: INVALID_TASK_ID
+        val targetTaskId = state?.lastKnownTaskId ?: activeState?.lastKnownTaskId ?: INVALID_TASK_ID
+        val sessionStatus = state?.status?.name ?: activeState?.status?.name ?: "null"
+        val activeSessionId = activeState?.sessionId ?: "null"
+        val displayId = currentVisibleId ?: currentExecutionId
+        val returnPolicy = state?.completionReturnPolicy?.name ?: activeState?.completionReturnPolicy?.name ?: "null"
+        val overlayUiState = overlayUiStateLabel(state ?: activeState)
         val stp = step ?: state?.automationStep ?: 0
         val at = actionType ?: "NONE"
         val ext = extras ?: "{}"
         return buildString {
             append("event=").append(event)
             append(" sessionId=").append(sid)
+            append(" sessionStatus=").append(sessionStatus)
+            append(" activeSessionId=").append(activeSessionId)
             append(" executionDisplayId=").append(executionId)
+            append(" displayId=").append(displayId)
             append(" currentExecutionDisplayId=").append(currentExecutionId)
             append(" currentVisibleDisplayId=").append(currentVisibleId ?: "null")
             append(" virtualDisplayId=").append(virtualId ?: "null")
             append(" surfaceDisplayId=").append(surfaceId ?: "null")
+            append(" taskId=").append(tid)
+            append(" targetTaskId=").append(targetTaskId)
             append(" sessionTaskId=").append(tid)
             append(" step=").append(stp)
             append(" actionType=").append(at)
+            append(" returnPolicy=").append(returnPolicy)
+            append(" overlayUiState=").append(overlayUiState)
             append(" code=").append(code)
             append(" extras=").append(ext)
             if (virtualId != null) {
                 append(" vdDisplayId=").append(virtualId)
             }
+        }
+    }
+
+    private fun notifySessionStateListenersIfNeeded(session: SessionState?) {
+        val snapshot = SessionStateListenerSnapshot.from(session)
+        if (snapshot == lastSessionListenerSnapshot) {
+            return
+        }
+        lastSessionListenerSnapshot = snapshot
+        if (sessionStateListeners.isEmpty()) {
+            return
+        }
+        sessionStateListeners.forEach { listener ->
+            listener.onSessionChanged(session)
+        }
+    }
+
+    private fun overlayUiStateLabel(state: SessionState?): String {
+        if (state == null || state.status in setOf(SessionStatus.CLOSED, SessionStatus.MIGRATED)) {
+            return "IDLE"
+        }
+        if (state.status == SessionStatus.COMPLETED) {
+            return "POST_COMPLETION"
+        }
+        if (state.recoveryNeeded ||
+            state.status == SessionStatus.FAILED ||
+            TaskMigrationPolicy.requiresRecovery(state.lastMigrationCode)
+        ) {
+            return "RECOVERY"
+        }
+        return when {
+            state.status == SessionStatus.WAITING_USER && state.migratedToMain -> "HANDOFF_ACTIVE"
+            state.status == SessionStatus.WAITING_USER -> "NEED_USER"
+            else -> "RUNNING"
         }
     }
 }

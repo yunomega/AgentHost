@@ -5,6 +5,17 @@ import android.os.Bundle;
 interface IAgentHostPlatformService {
     Bundle captureDisplay(String sessionId, int displayId);
 
+    Bundle registerExecutionDisplaySession(String sessionId, int executionDisplayId);
+
+    Bundle updateExecutionDisplaySessionState(
+        String sessionId,
+        int executionDisplayId,
+        String state,
+        String reason
+    );
+
+    Bundle clearExecutionDisplaySession(String sessionId, String reason);
+
     Bundle injectTap(String sessionId, int displayId, int x, int y);
 
     Bundle injectSwipe(

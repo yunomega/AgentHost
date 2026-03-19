@@ -1,11 +1,10 @@
 package com.example.agenthost.session
 
 import android.app.Activity
-import android.os.Bundle
 import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
+import android.os.Bundle
 import android.util.Log
-import android.view.Display
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -41,9 +40,7 @@ class SessionRootActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         rootRole = intent?.getStringExtra(EXTRA_ROOT_ROLE).orEmpty().ifBlank { ROOT_ROLE_PRIMARY }
-        val requestedDisplayMode = intent?.getStringExtra(EXTRA_DISPLAY_MODE).orEmpty()
-        val requestedExecutionDisplayId = intent?.getIntExtra(EXTRA_EXECUTION_DISPLAY_ID, -1) ?: -1
-        if (shouldUsePassivePrimaryShell(rootRole, requestedDisplayMode, requestedExecutionDisplayId)) {
+        if (SessionRootPolicy.shouldUsePassivePrimaryShell(rootRole)) {
             setTheme(R.style.Theme_AgentHost_SessionRoot_Transparent)
         }
         super.onCreate(savedInstanceState)
@@ -84,11 +81,7 @@ class SessionRootActivity : Activity() {
         val component = componentName.flattenToShortString()
         val reportedDisplayId = forcedReportDisplayId ?: currentDisplayId
 
-        val passivePrimaryShell = shouldUsePassivePrimaryShell(
-            rootRole = rootRole,
-            displayMode = displayMode,
-            executionDisplayId = executionDisplayId
-        )
+        val passivePrimaryShell = SessionRootPolicy.shouldUsePassivePrimaryShell(rootRole)
 
         if (rootRole == ROOT_ROLE_PRIMARY) {
             if (passivePrimaryShell) {
@@ -160,7 +153,13 @@ class SessionRootActivity : Activity() {
                     "virtualDisplayId=$virtualDisplayId surfaceDisplayId=$surfaceDisplayId " +
                     "sessionTaskId=$currentTaskId code=PRIMARY_SHELL_READY " +
                     "extras=currentDisplayId=$currentDisplayId role=$rootRole " +
-                    "interactionMode=${if (passivePrimaryShell) "passive_main_display" else "interactive_execution"}"
+                    "interactionMode=${
+                        SessionRootPolicy.primaryInteractionMode(
+                            rootRole = rootRole,
+                            displayMode = displayMode,
+                            executionDisplayId = executionDisplayId
+                        )
+                    }"
             )
         } else {
             setContentView(
@@ -282,16 +281,5 @@ class SessionRootActivity : Activity() {
         )
         window.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
         window.setDimAmount(0f)
-    }
-
-    private fun shouldUsePassivePrimaryShell(
-        rootRole: String,
-        displayMode: String,
-        executionDisplayId: Int
-    ): Boolean {
-        if (rootRole != ROOT_ROLE_PRIMARY) {
-            return false
-        }
-        return displayMode == "MAIN_DISPLAY" || executionDisplayId == Display.DEFAULT_DISPLAY
     }
 }

@@ -215,7 +215,7 @@ class ModelPlanningAdapterTest {
     fun plannedActionPreservesProxySanitizerMetaInCanonicalAction() {
         val adapter = adapterForSuccess(
             """
-            {"action":"CLICK","x":540,"y":960,"_meta":{"coordSpace":"IMAGE_PIXEL","sanitizerPath":"direct_valid","sourceModel":"qwen3-vl-plus","sourceMode":"openai_compatible","rawModelAction":"{\"action\":\"CLICK\",\"x\":500,\"y\":500}"}} 
+            {"action":"CLICK","x":540,"y":960,"_meta":{"coordSpace":"IMAGE_PIXEL","sanitizerPath":"direct_valid","sourceModel":"glm-4.6v","sourceMode":"openai_compatible","rawModelAction":"{\"action\":\"CLICK\",\"x\":500,\"y\":500}"}} 
             """.trimIndent()
         )
 
@@ -226,7 +226,7 @@ class ModelPlanningAdapterTest {
         assertEquals("CLICK", planned.action.actionType())
         assertEquals("direct_valid", planned.canonicalAction.sanitizerPath)
         assertEquals("IMAGE_PIXEL", planned.canonicalAction.coordSpace.name)
-        assertEquals("qwen3-vl-plus", planned.canonicalAction.sourceModel)
+        assertEquals("glm-4.6v", planned.canonicalAction.sourceModel)
         assertEquals("openai_compatible", planned.canonicalAction.sourceMode)
         assertEquals("{\"action\":\"CLICK\",\"x\":500,\"y\":500}", planned.canonicalAction.rawModelAction)
         assertNotNull(planned.rawResponseText)

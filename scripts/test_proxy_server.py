@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sys
 import unittest
 from dataclasses import fields
 from pathlib import Path
+from unittest import mock
 
 
 SCRIPT_PATH = Path(__file__).with_name("proxy_server.py")
@@ -106,21 +108,23 @@ class ProxyServerPlanTest(unittest.TestCase):
         self.assertEqual("IMAGE_PIXEL", output["_meta"]["coordSpace"])
         self.assertEqual("direct_valid", output["_meta"]["sanitizerPath"])
         self.assertEqual("openai_compatible", output["_meta"]["sourceMode"])
-        self.assertEqual("qwen3-vl-plus", output["_meta"]["sourceModel"])
+        self.assertEqual("glm-4.6v", output["_meta"]["sourceModel"])
         self.assertEqual('{"action":"CLICK","x":500,"y":500}', output["_meta"]["rawModelAction"])
 
         upstream_payload = fake_session.calls[0]["json"]
+        self.assertEqual({"type": "json_object"}, upstream_payload["response_format"])
         messages = upstream_payload["messages"]
         system_prompt = messages[0]["content"]
         user_text = messages[1]["content"][0]["text"]
-        self.assertIn("Dynamic task context, current phase, capability limits, recent history, and failure hints appear in the user message.", system_prompt)
+        self.assertIn("用户消息中会给出动态任务上下文、当前阶段、能力限制、最近历史和失败提示，必须严格遵守。", system_prompt)
+        self.assertIn("输出必须满足以下结构约束：顶层必须是一个 JSON object，且必须包含 action 字段。", system_prompt)
         self.assertNotIn("NEED_CLICK_TARGET", system_prompt)
         self.assertNotIn("ASK_USER, CLICK, DONE, SWIPE", system_prompt)
-        self.assertIn("Current phase: NEED_CLICK_TARGET", user_text)
-        self.assertIn("Target hint: 语燕输入法", user_text)
-        self.assertIn("Capabilities:", user_text)
-        self.assertIn("History:", user_text)
-        self.assertIn("Recent control action: step=2 type=CLICK result=SUCCESS_NO_CHANGE", user_text)
+        self.assertIn("当前阶段：NEED_CLICK_TARGET", user_text)
+        self.assertIn("目标提示：语燕输入法", user_text)
+        self.assertIn("能力：", user_text)
+        self.assertIn("历史：", user_text)
+        self.assertIn("最近控制动作：step=2 type=CLICK result=SUCCESS_NO_CHANGE", user_text)
 
     def test_done_only_prompt_constrains_output_and_meta_uses_none_coord_space(self):
         fake_session = FakeSession(
@@ -151,8 +155,8 @@ class ProxyServerPlanTest(unittest.TestCase):
 
         system_prompt = fake_session.calls[0]["json"]["messages"][0]["content"]
         user_text = fake_session.calls[0]["json"]["messages"][1]["content"][0]["text"]
-        self.assertNotIn("Only return DONE or ASK_USER.", system_prompt)
-        self.assertIn("Phase guidance: The system has already marked the target as completed. Only return DONE or ASK_USER.", user_text)
+        self.assertNotIn("只能返回 DONE 或 ASK_USER", system_prompt)
+        self.assertIn("阶段指引：系统已经将目标判定为完成，此时只能返回 DONE 或 ASK_USER。", user_text)
 
     def test_android_legacy_prompt_fields_are_not_forwarded_to_upstream_prompt(self):
         fake_session = FakeSession(
@@ -194,7 +198,7 @@ class ProxyServerPlanTest(unittest.TestCase):
         sanitized = PROXY_SERVER.sanitize_model_output(
             '{"action":"ASK_USER","question":"请提供要输入的搜索内容。"}',
             {"width": 1080, "height": 1920},
-            source_model="qwen3-vl-plus",
+            source_model="glm-4.6v",
             source_mode="openai_compatible",
         )
 
@@ -240,6 +244,61 @@ class ProxyServerPlanTest(unittest.TestCase):
         self.assertEqual("UPSTREAM_FAIL", body["code"])
         self.assertEqual("try later", body["message"])
 
+    def test_load_settings_prefers_upstream_over_bigmodel_and_legacy_aliases(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "UPSTREAM_BASE_URL": "https://upstream.example/v1",
+                "BIGMODEL_BASE_URL": "https://bigmodel.example/v1",
+                "DASHSCOPE_BASE_URL": "https://dashscope.example/v1",
+                "UPSTREAM_CHAT_PATH": "/u/chat/completions",
+                "BIGMODEL_CHAT_PATH": "/b/chat/completions",
+                "DASHSCOPE_CHAT_PATH": "/d/chat/completions",
+                "UPSTREAM_MODEL": "upstream-model",
+                "BIGMODEL_MODEL": "bigmodel-model",
+                "DASHSCOPE_MODEL": "dashscope-model",
+                "UPSTREAM_TIMEOUT_SECONDS": "45",
+                "BIGMODEL_TIMEOUT_SECONDS": "30",
+                "DASHSCOPE_TIMEOUT_SECONDS": "15",
+                "UPSTREAM_API_KEY": "upstream-key",
+                "BIGMODEL_API_KEY": "bigmodel-key",
+                "DASHSCOPE_API_KEY": "dashscope-key",
+            },
+            clear=True,
+        ):
+            settings = PROXY_SERVER.load_settings()
+
+        self.assertEqual("https://upstream.example/v1", settings.upstream_base_url)
+        self.assertEqual("/u/chat/completions", settings.upstream_chat_path)
+        self.assertEqual("upstream-model", settings.upstream_model)
+        self.assertEqual(45.0, settings.upstream_timeout_seconds)
+        self.assertEqual("upstream-key", settings.upstream_api_key)
+
+    def test_load_settings_prefers_bigmodel_over_legacy_dashscope_aliases(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "BIGMODEL_BASE_URL": "https://bigmodel.example/v1",
+                "DASHSCOPE_BASE_URL": "https://dashscope.example/v1",
+                "BIGMODEL_CHAT_PATH": "/b/chat/completions",
+                "DASHSCOPE_CHAT_PATH": "/d/chat/completions",
+                "BIGMODEL_MODEL": "bigmodel-model",
+                "DASHSCOPE_MODEL": "dashscope-model",
+                "BIGMODEL_TIMEOUT_SECONDS": "31",
+                "DASHSCOPE_TIMEOUT_SECONDS": "16",
+                "BIGMODEL_API_KEY": "bigmodel-key",
+                "DASHSCOPE_API_KEY": "dashscope-key",
+            },
+            clear=True,
+        ):
+            settings = PROXY_SERVER.load_settings()
+
+        self.assertEqual("https://bigmodel.example/v1", settings.upstream_base_url)
+        self.assertEqual("/b/chat/completions", settings.upstream_chat_path)
+        self.assertEqual("bigmodel-model", settings.upstream_model)
+        self.assertEqual(31.0, settings.upstream_timeout_seconds)
+        self.assertEqual("bigmodel-key", settings.upstream_api_key)
+
     def make_settings(self, **overrides):
         values = {
             field.name: getattr(self.original_settings, field.name)
@@ -250,7 +309,7 @@ class ProxyServerPlanTest(unittest.TestCase):
         values.setdefault("proxy_port", 8080)
         values.setdefault("upstream_base_url", "https://example.com/v1")
         values.setdefault("upstream_chat_path", "/chat/completions")
-        values.setdefault("upstream_model", "qwen3-vl-plus")
+        values.setdefault("upstream_model", "glm-4.6v")
         values.setdefault("upstream_timeout_seconds", 30.0)
         values.setdefault("upstream_api_key", "dummy")
         values.setdefault("log_body_chars", 400)

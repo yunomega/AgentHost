@@ -9,11 +9,15 @@ Usage:
 Environment variables:
   PROXY_HOST=0.0.0.0
   PROXY_PORT=8080
-  UPSTREAM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+  UPSTREAM_BASE_URL=https://open.bigmodel.cn/api/paas/v4
   UPSTREAM_CHAT_PATH=/chat/completions
-  UPSTREAM_MODEL=qwen3-vl-plus
+  UPSTREAM_MODEL=glm-4.6v
   UPSTREAM_TIMEOUT_SECONDS=30
   UPSTREAM_API_KEY=
+  BIGMODEL_BASE_URL=https://open.bigmodel.cn/api/paas/v4
+  BIGMODEL_CHAT_PATH=/chat/completions
+  BIGMODEL_MODEL=glm-4.6v
+  BIGMODEL_API_KEY=
   DASHSCOPE_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
   DASHSCOPE_CHAT_PATH=/chat/completions
   DASHSCOPE_MODEL=qwen3-vl-plus
@@ -129,26 +133,34 @@ def load_settings() -> Settings:
         proxy_port=get_env_int("PROXY_PORT", 8080, 1),
         upstream_base_url=get_first_env(
             "UPSTREAM_BASE_URL",
+            "BIGMODEL_BASE_URL",
             "DASHSCOPE_BASE_URL",
-            default="https://dashscope.aliyuncs.com/compatible-mode/v1",
+            default="https://open.bigmodel.cn/api/paas/v4",
         ),
         upstream_chat_path=get_first_env(
             "UPSTREAM_CHAT_PATH",
+            "BIGMODEL_CHAT_PATH",
             "DASHSCOPE_CHAT_PATH",
             default="/chat/completions",
         ),
         upstream_model=get_first_env(
             "UPSTREAM_MODEL",
+            "BIGMODEL_MODEL",
             "DASHSCOPE_MODEL",
-            default="qwen3-vl-plus",
+            default="glm-4.6v",
         ),
         upstream_timeout_seconds=get_env_float_alias(
-            ("UPSTREAM_TIMEOUT_SECONDS", "DASHSCOPE_TIMEOUT_SECONDS"),
+            (
+                "UPSTREAM_TIMEOUT_SECONDS",
+                "BIGMODEL_TIMEOUT_SECONDS",
+                "DASHSCOPE_TIMEOUT_SECONDS",
+            ),
             30.0,
             1.0,
         ),
         upstream_api_key=get_first_env(
             "UPSTREAM_API_KEY",
+            "BIGMODEL_API_KEY",
             "DASHSCOPE_API_KEY",
             default="",
         ),
@@ -334,17 +346,26 @@ def normalize_image_data_url(value: str) -> str:
 
 def build_system_prompt(payload: dict[str, Any]) -> str:
     lines = [
-        "You are a GUI Agent acting for Android AgentHost.",
-        "Return exactly one raw JSON object and nothing else.",
-        "Do not output markdown, code fences, explanations, natural language, or extra text.",
-        "Do not output arrays, multiple actions, or actions/steps containers.",
-        "The JSON object must be directly parseable by a strict Android single-action parser.",
-        "For CLICK, LONG_PRESS, and SWIPE, output coordinates in thousandths of the screenshot size (0-1000), not absolute pixels.",
-        "Supported action names in this protocol are: CLICK, LONG_PRESS, SWIPE, TYPE_TEXT, BACK, HOME, WAIT, ASK_USER, DONE.",
-        "Use the current screenshot as the main source of truth.",
-        "If the requested destination, page, toggle, or list item is already open or clearly visible, return DONE immediately.",
-        "Only use TYPE_TEXT when text entry is clearly required and the target is not already visible on screen.",
-        "Dynamic task context, current phase, capability limits, recent history, and failure hints appear in the user message. Follow them strictly.",
+        "你是 Android AgentHost 的 GUI Agent。",
+        "只返回一个原始 JSON 对象，不要返回其他任何内容。",
+        "不要输出 markdown、代码块、解释、自然语言或额外文本。",
+        "不要输出数组、多个动作，或任何 actions/steps 容器。",
+        "返回的 JSON 对象必须能被 Android 侧严格单动作解析器直接解析。",
+        "对于 CLICK、LONG_PRESS 和 SWIPE，坐标必须使用截图尺寸的千分位坐标（0-1000），不要输出绝对像素。",
+        "本协议支持的动作名只有：CLICK、LONG_PRESS、SWIPE、TYPE_TEXT、BACK、HOME、WAIT、ASK_USER、DONE。",
+        "当前截图是你的主要事实依据。",
+        "如果目标页面、开关、列表项已经打开或清晰可见，应立即返回 DONE。",
+        "只有在明确需要输入文字且目标内容当前未显示在屏幕上时，才使用 TYPE_TEXT。",
+        "用户消息中会给出动态任务上下文、当前阶段、能力限制、最近历史和失败提示，必须严格遵守。",
+        "输出必须满足以下结构约束：顶层必须是一个 JSON object，且必须包含 action 字段。",
+        "如果 action 是 CLICK 或 LONG_PRESS，必须包含数值字段 x 和 y。",
+        "如果 action 是 SWIPE，必须包含数值字段 x1、y1、x2、y2，可选 durationMs。",
+        "如果 action 是 TYPE_TEXT，必须包含字符串字段 text。",
+        "如果 action 是 WAIT，必须包含数值字段 durationMs。",
+        "如果 action 是 ASK_USER，必须包含字符串字段 question。",
+        "如果 action 是 DONE，建议包含字符串字段 reason。",
+        "如果 action 是 BACK 或 HOME，不需要其他字段。",
+        "不要输出 schema 说明，不要输出注释，不要输出额外键名解释。",
         'Example valid output: {"action":"CLICK","x":500,"y":500}',
         'Example valid output: {"action":"SWIPE","x1":500,"y1":800,"x2":500,"y2":300,"durationMs":400}',
         'Example valid output: {"action":"TYPE_TEXT","text":"hello123"}',
@@ -373,98 +394,92 @@ def build_user_text(payload: dict[str, Any]) -> str:
         capability_profile
     )
 
-    lines = ["Task:"]
-    lines.append(f"User command: {context.get('command') or payload.get('userPrompt') or ''}")
-    lines.append(f"Step: {payload.get('step')}")
-    lines.append(f"SessionId: {payload.get('sessionId')}")
+    lines = ["任务信息："]
+    lines.append(f"用户指令：{context.get('command') or payload.get('userPrompt') or ''}")
+    lines.append(f"步骤：{payload.get('step')}")
+    lines.append(f"会话 ID：{payload.get('sessionId')}")
     lines.append("")
 
-    lines.append("Observation:")
-    lines.append(f"Observation status: {observation.get('status') or 'UNKNOWN'}")
+    lines.append("观察：")
+    lines.append(f"观察状态：{observation.get('status') or 'UNKNOWN'}")
 
     width = observation.get("width")
     height = observation.get("height")
     if width not in (None, -1) and height not in (None, -1):
-        lines.append(f"Observation size: {width}x{height}")
+        lines.append(f"观察尺寸：{width}x{height}")
 
     if observation.get("code"):
-        lines.append(f"Observation code: {observation.get('code')}")
+        lines.append(f"观察错误码：{observation.get('code')}")
     if observation.get("message"):
-        lines.append(f"Observation message: {observation.get('message')}")
+        lines.append(f"观察消息：{observation.get('message')}")
     lines.append("")
 
-    lines.append("Capabilities:")
-    lines.append(f"Capability summary: {context.get('capabilitySummary') or 'n/a'}")
+    lines.append("能力：")
+    lines.append(f"能力摘要：{context.get('capabilitySummary') or 'n/a'}")
     lines.append(
-        f"Capability profile JSON: {compact_json(capability_profile) if capability_profile else '{}'}"
+        f"能力画像 JSON：{compact_json(capability_profile) if capability_profile else '{}'}"
     )
     lines.append(
-        f"Capability-allowed actions: {', '.join(capability_allowed) if capability_allowed else 'NONE'}"
+        f"能力允许的动作：{', '.join(capability_allowed) if capability_allowed else 'NONE'}"
     )
     lines.append(
-        f"Capability-blocked actions: {', '.join(capability_blocked) if capability_blocked else 'NONE'}"
+        f"能力禁止的动作：{', '.join(capability_blocked) if capability_blocked else 'NONE'}"
     )
     lines.append(
-        f"Capability-unknown actions: {', '.join(capability_unknown) if capability_unknown else 'NONE'}"
+        f"能力未知的动作：{', '.join(capability_unknown) if capability_unknown else 'NONE'}"
     )
     text_level = str(capability_profile.get("textSupportLevel") or "").strip().upper()
     if text_level == "ASCII_BASIC":
-        lines.append(
-            "TYPE_TEXT is limited to printable ASCII only (U+0020-U+007E plus tab/newline/carriage return)."
-        )
-        lines.append(
-            "Do not output Chinese or any other non-ASCII characters in TYPE_TEXT.text."
-        )
-        lines.append(
-            "If non-ASCII text would be needed, choose another allowed action instead of TYPE_TEXT."
-        )
+        lines.append("TYPE_TEXT 仅支持可打印 ASCII（U+0020-U+007E，加 tab/newline/carriage return）。")
+        lines.append("不要在 TYPE_TEXT.text 中输出中文或其他非 ASCII 字符。")
+        lines.append("如果任务需要非 ASCII 文本，请改用其他允许的动作，而不是 TYPE_TEXT。")
     lines.append("")
 
-    lines.append("Phase and action constraints:")
+    lines.append("阶段与动作限制：")
     if agent_control.get("currentPhase"):
-        lines.append(f"Current phase: {agent_control.get('currentPhase')}")
+        lines.append(f"当前阶段：{agent_control.get('currentPhase')}")
     if agent_control.get("parentHint"):
-        lines.append(f"Parent hint: {agent_control.get('parentHint')}")
+        lines.append(f"父目标提示：{agent_control.get('parentHint')}")
     if agent_control.get("targetHint"):
-        lines.append(f"Target hint: {agent_control.get('targetHint')}")
+        lines.append(f"目标提示：{agent_control.get('targetHint')}")
     if agent_control.get("lastResult"):
-        lines.append(f"Last result: {agent_control.get('lastResult')}")
+        lines.append(f"上一步结果：{agent_control.get('lastResult')}")
     if agent_control.get("completionState"):
-        lines.append(f"Completion state: {agent_control.get('completionState')}")
+        lines.append(f"完成状态：{agent_control.get('completionState')}")
     allowed_actions = agent_control.get("allowedActions")
     if isinstance(allowed_actions, list) and allowed_actions:
-        lines.append(f"Allowed actions now: {', '.join(str(item) for item in allowed_actions)}")
+        lines.append(f"当前允许的动作：{', '.join(str(item) for item in allowed_actions)}")
     blocked_actions = agent_control.get("blockedActions")
     if isinstance(blocked_actions, list) and blocked_actions:
-        lines.append(f"Blocked actions now: {', '.join(str(item) for item in blocked_actions)}")
+        lines.append(f"当前禁止的动作：{', '.join(str(item) for item in blocked_actions)}")
     control_phase = str(agent_control.get("currentPhase") or "").strip()
     if agent_control.get("doneOnly") is True:
-        lines.append("Phase guidance: The system has already marked the target as completed. Only return DONE or ASK_USER.")
+        lines.append("阶段指引：系统已经将目标判定为完成，此时只能返回 DONE 或 ASK_USER。")
     elif control_phase == "NEED_OPEN_PARENT":
-        lines.append("Phase guidance: Focus on opening the parent destination first. Avoid exploratory backtracking.")
+        lines.append("阶段指引：优先打开父级目标，不要进行探索式回退。")
     elif control_phase == "NEED_CLICK_TARGET":
-        lines.append("Phase guidance: Focus on clicking the target item once or scrolling to find it. Avoid BACK and HOME.")
+        lines.append("阶段指引：聚焦于点击目标项，或滚动查找目标项；避免使用 BACK 和 HOME。")
     elif control_phase == "TARGET_CLICKED_PENDING_SETTLE":
-        lines.append("Phase guidance: The target may already be complete. Prefer DONE, ASK_USER, or WAIT. Do not keep clicking.")
+        lines.append("阶段指引：目标可能已经完成，优先考虑 DONE、ASK_USER 或 WAIT，不要继续重复点击。")
     lines.append("")
 
-    lines.append("History:")
+    lines.append("历史：")
     if recent_actions:
-        lines.append(f"Recent action count: {len(recent_actions)}")
+        lines.append(f"最近动作数：{len(recent_actions)}")
         for action in recent_actions[-3:]:
             if not isinstance(action, dict):
                 continue
             lines.append(
-                "Recent action: "
-                f"step={action.get('step')} type={action.get('actionType')} "
+                "最近动作："
+                f" step={action.get('step')} type={action.get('actionType')} "
                 f"code={action.get('code')} summary={action.get('summary')}"
             )
     else:
-        lines.append("Recent action count: 0")
+        lines.append("最近动作数：0")
 
     control_recent_actions = agent_control.get("recentActions")
     if isinstance(control_recent_actions, list) and control_recent_actions:
-        lines.append(f"Recent control action count: {len(control_recent_actions)}")
+        lines.append(f"最近控制动作数：{len(control_recent_actions)}")
         for action in control_recent_actions[-4:]:
             if not isinstance(action, dict):
                 continue
@@ -473,26 +488,26 @@ def build_user_text(payload: dict[str, Any]) -> str:
             if isinstance(point, dict):
                 point_summary = f" point=({point.get('x')},{point.get('y')})"
             lines.append(
-                "Recent control action: "
+                "最近控制动作："
                 f"step={action.get('step')} type={action.get('actionType')} "
                 f"result={action.get('resultCategory')} phase={action.get('phaseAfter')}{point_summary} "
                 f"summary={action.get('summary')}"
             )
     else:
-        lines.append("Recent control action count: 0")
+        lines.append("最近控制动作数：0")
     lines.append("")
 
-    lines.append("Failure and reply context:")
+    lines.append("失败与回复上下文：")
     if context.get("lastFailureCode"):
-        lines.append(f"Last failure code: {context.get('lastFailureCode')}")
+        lines.append(f"上次失败码：{context.get('lastFailureCode')}")
     if context.get("lastUserReply"):
-        lines.append(f"Last user reply: {context.get('lastUserReply')}")
+        lines.append(f"上次用户回复：{context.get('lastUserReply')}")
     if not context.get("lastFailureCode") and not context.get("lastUserReply"):
-        lines.append("No last failure code or user reply.")
+        lines.append("没有上次失败码，也没有用户回复。")
     lines.append("")
 
-    lines.append("Decision:")
-    lines.append("Choose the single best next action based on the screenshot and the dynamic context above.")
+    lines.append("决策：")
+    lines.append("请基于截图和以上动态上下文，选择唯一一个最合适的下一步动作。")
     return "\n".join(lines)
 
 
@@ -531,6 +546,9 @@ def build_upstream_request(payload: dict[str, Any], settings: Settings) -> dict[
                 "content": user_content,
             },
         ],
+        "response_format": {
+            "type": "json_object",
+        },
         "temperature": 0,
         "stream": False,
     }

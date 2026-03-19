@@ -11,8 +11,13 @@ import android.os.Looper
 import android.util.Log
 import androidx.core.app.ServiceCompat
 import com.example.agenthost.core.AgentHostRuntime
+import com.example.agenthost.debug.TaskRunReportHooks
 import com.example.agenthost.session.SessionCoordinator
+import com.example.agenthost.session.SessionBootstrapTarget
 import com.example.agenthost.session.SessionResult
+import com.example.agenthost.session.SessionStateListener
+import com.example.agenthost.session.SessionStateListenerSnapshot
+import com.example.agenthost.session.SessionStartOptions
 import java.util.concurrent.Executors
 
 class OverlayEntryService : Service() {
@@ -28,6 +33,10 @@ class OverlayEntryService : Service() {
     private lateinit var actionDispatcher: OverlayActionDispatcher
     private lateinit var presencePrefs: OverlayPresencePrefs
     private var foregroundStarted = false
+    private var lastRenderedSessionSnapshot: SessionStateListenerSnapshot? = null
+    private val sessionStateListener = SessionStateListener { session ->
+        mainHandler.post { renderOverlayIfChanged(session) }
+    }
     private val pollRunnable = object : Runnable {
         override fun run() {
             refreshOverlay()
@@ -37,7 +46,7 @@ class OverlayEntryService : Service() {
 
     inner class LocalBinder : Binder() {
         fun start(command: String): SessionResult {
-            return startWithAutomation(command).also { requestOverlayRefresh() }
+            return startNewTaskIfIdle(command).also { requestOverlayRefresh() }
         }
 
         fun stop(migrate: Boolean): SessionResult {
@@ -58,13 +67,15 @@ class OverlayEntryService : Service() {
         actionDispatcher = OverlayActionDispatcher(
             coordinatorProvider = ::sessionCoordinator,
             executor = worker,
-            onActionComplete = ::requestOverlayRefresh
+            onActionComplete = ::requestOverlayRefresh,
+            startNewTask = ::startNewTaskIfIdle
         )
         overlayController = OverlayController(
             context = applicationContext,
             stateMapper = OverlayStateMapper(),
             actionDispatcher = actionDispatcher
         )
+        sessionCoordinator().addSessionStateListener(sessionStateListener)
         overlayController.show()
         mainHandler.post(pollRunnable)
     }
@@ -93,7 +104,7 @@ class OverlayEntryService : Service() {
             OverlayActions.ACTION_START_SESSION -> {
                 val command = intent.getStringExtra(OverlayActions.EXTRA_COMMAND).orEmpty()
                 worker.execute {
-                    val result = startWithAutomation(command)
+                    val result = startNewTaskIfIdle(command)
                     Log.i(TAG, "start result code=${result.code} ok=${result.ok} data=${result.data}")
                     requestOverlayRefresh()
                 }
@@ -127,6 +138,7 @@ class OverlayEntryService : Service() {
 
     override fun onDestroy() {
         mainHandler.removeCallbacksAndMessages(null)
+        sessionCoordinator().removeSessionStateListener(sessionStateListener)
         overlayController.destroy()
         if (foregroundStarted) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
@@ -168,7 +180,22 @@ class OverlayEntryService : Service() {
 
     private fun startWithAutomation(command: String): SessionResult {
         val coordinator = sessionCoordinator()
-        val startResult = coordinator.startSession(command)
+        val plannerConfig = OverlayModelPlannerConfig.create()
+        val modelConfig = plannerConfig.modelConfig
+        Log.i(
+            TAG,
+            "overlay_start_request source=overlay plannerMode=${plannerConfig.mode.name} " +
+                "endpointConfigured=${modelConfig.hasEndpoint()} apiKeyConfigured=${modelConfig.hasResolvedApiKey()} " +
+                "endpoint=${modelConfig.endpoint ?: "null"}"
+        )
+        TaskRunReportHooks.prepareNextSessionSource("OVERLAY")
+        val startResult = coordinator.startSession(
+            command,
+            SessionStartOptions(
+                bootstrapTarget = SessionBootstrapTarget.SETTINGS,
+                plannerConfigOverride = plannerConfig
+            )
+        )
         if (!startResult.ok) {
             return startResult
         }
@@ -177,8 +204,28 @@ class OverlayEntryService : Service() {
                 ok = false,
                 code = "SESSION_ID_MISSING",
                 data = startResult.data
-            )
+        )
         return coordinator.startAutomation(sessionId)
+    }
+
+    private fun startNewTaskIfIdle(command: String): SessionResult {
+        val trimmed = command.trim()
+        if (trimmed.isEmpty()) {
+            return SessionResult(ok = false, code = "COMMAND_EMPTY")
+        }
+        val result = OverlayStartGuard(
+            sessionGateway = sessionCoordinator(),
+            logger = { message -> Log.i(TAG, message) },
+            startTask = ::startWithAutomation
+        ).start(trimmed)
+        if (!result.ok && result.code == "SESSION_ALREADY_ACTIVE") {
+            Log.i(
+                TAG,
+                "guarded_start_blocked code=${result.code} activeSessionId=${result.data["sessionId"]} " +
+                    "status=${result.data["status"]}"
+            )
+        }
+        return result
     }
 
     private fun requestOverlayRefresh() {
@@ -186,7 +233,16 @@ class OverlayEntryService : Service() {
     }
 
     private fun refreshOverlay() {
-        overlayController.render(sessionCoordinator().getActiveSession())
+        renderOverlayIfChanged(sessionCoordinator().getActiveSession())
+    }
+
+    private fun renderOverlayIfChanged(session: com.example.agenthost.session.SessionState?) {
+        val snapshot = SessionStateListenerSnapshot.from(session)
+        if (snapshot == lastRenderedSessionSnapshot) {
+            return
+        }
+        lastRenderedSessionSnapshot = snapshot
+        overlayController.render(session)
     }
 
     private fun sessionCoordinator(): SessionCoordinator {

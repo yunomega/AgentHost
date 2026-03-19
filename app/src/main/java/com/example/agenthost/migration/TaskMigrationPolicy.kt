@@ -9,6 +9,18 @@ data class TaskValidationResult(
 )
 
 internal object TaskMigrationPolicy {
+    private val completionReturnSuccessCodes = setOf(
+        "TASK_MIGRATION_OK",
+        "TASK_MIGRATION_ALREADY_ON_MAIN"
+    )
+
+    private val idleFallbackCodes = setOf(
+        "TARGET_TASK_NOT_FOUND",
+        "TARGET_TASK_REMOVED",
+        "TASK_ID_STALE",
+        "TASK_QUERY_UNSUPPORTED"
+    )
+
     private val recoveryCodes = setOf(
         "TASK_CONFLICT_ON_MAIN",
         "USER_OWNS_MAIN_INSTANCE",
@@ -25,6 +37,18 @@ internal object TaskMigrationPolicy {
 
     fun requiresRecovery(code: String?): Boolean {
         return code != null && code in recoveryCodes
+    }
+
+    fun isCompletionReturnSuccess(code: String?): Boolean {
+        return code != null && code in completionReturnSuccessCodes
+    }
+
+    fun shouldCompletionFallbackToCleanup(code: String?): Boolean {
+        return !isCompletionReturnSuccess(code)
+    }
+
+    fun shouldFallbackToIdle(code: String?): Boolean {
+        return code != null && code in idleFallbackCodes
     }
 
     fun isSamePackageDifferentTask(

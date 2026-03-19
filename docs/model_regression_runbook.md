@@ -13,6 +13,7 @@ Short device-side runbook for validating AgentHost `MODEL` planning against the 
 
 - Local mock server: prefer `adb reverse`, so the device uses `http://127.0.0.1:8080`.
 - Real remote gateway: do **not** rely on `adb reverse`; pass `MOCK_SERVER_IP=<server-ip>` explicitly.
+- Real BigModel upstream: keep the device pointed at the local proxy `http://127.0.0.1:8080/plan`; configure the proxy with `BIGMODEL_API_KEY` (or `UPSTREAM_API_KEY`), `BIGMODEL_BASE_URL=https://open.bigmodel.cn/api/paas/v4`, and `BIGMODEL_MODEL=glm-4.6v`.
 
 ## Mock server startup
 

@@ -13,6 +13,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 
 class SessionAutomationEngineModelModeTest {
     @Test
@@ -87,6 +88,45 @@ class SessionAutomationEngineModelModeTest {
         val restart = engine.startAutomation("s2")
         assertTrue(restart.ok)
         engine.stopAutomation("s2")
+    }
+
+    @Test
+    fun finishSessionClearsPlannerAndHistoryState() {
+        val history = AutomationHistory()
+        history.setLastUserReply("s4", "123456")
+        history.setLastFailureCode("s4", "MODEL_TIMEOUT")
+        history.recordAction("s4", 1, "CLICK", "OK", "tap login")
+        val clearedSessions = mutableListOf<String>()
+        val planner = object : PlanningAdapter {
+            override fun modeForSession(sessionId: String): PlanningMode = PlanningMode.MODEL
+
+            override fun planNext(request: PlanningRequest): PlanResult {
+                return PlanResult.PlanFailure(
+                    code = "UNEXPECTED_PLAN",
+                    message = "finishSession test should not invoke planner"
+                )
+            }
+
+            override fun clearSession(sessionId: String) {
+                clearedSessions += sessionId
+            }
+        }
+        val engine = SessionAutomationEngine(
+            callbacks = TestCallbacks(sessionId = "s4", command = "noop"),
+            observationProvider = FailedObservationProvider,
+            planningAdapter = planner,
+            actionExecutor = FakeExecutor(),
+            history = history,
+            maxSteps = 1,
+            maxActionRetries = 0
+        )
+
+        engine.finishSession("s4")
+
+        assertEquals(listOf("s4"), clearedSessions)
+        assertNull(history.lastUserReply("s4"))
+        assertNull(history.lastFailureCode("s4"))
+        assertTrue(history.recentActions("s4").isEmpty())
     }
 
     @Test
@@ -235,6 +275,252 @@ class SessionAutomationEngineModelModeTest {
         } finally {
             worker.shutdownNow()
         }
+    }
+
+    @Test
+    fun retriesFirstVirtualDisplayObservationOnceBeforePlanning() {
+        val history = AutomationHistory()
+        val callbacks = TestCallbacks(sessionId = "s4", command = "finish once")
+        val captureCalls = AtomicInteger(0)
+        val plannedObservation = AtomicReference<ObservationResult?>(null)
+        val planner = object : PlanningAdapter {
+            override fun modeForSession(sessionId: String): PlanningMode = PlanningMode.MODEL
+
+            override fun planNext(request: PlanningRequest): PlanResult {
+                plannedObservation.set(request.observation)
+                return PlanResult.PlannedAction(GuiAction.Done("done"))
+            }
+
+            override fun clearSession(sessionId: String) = Unit
+        }
+        val observationProvider = object : ObservationProvider {
+            override fun capture(request: ObservationRequest): ObservationResult {
+                val call = captureCalls.incrementAndGet()
+                return if (call == 1) {
+                    ObservationResult.Captured(
+                        base64Png = "first_black_frame",
+                        width = 1080,
+                        height = 1920
+                    )
+                } else {
+                    ObservationResult.Captured(
+                        base64Png = "second_real_frame",
+                        width = 1080,
+                        height = 1920
+                    )
+                }
+            }
+        }
+        val engine = SessionAutomationEngine(
+            callbacks = callbacks,
+            observationProvider = observationProvider,
+            planningAdapter = planner,
+            actionExecutor = FakeExecutor(),
+            history = history,
+            maxSteps = 5,
+            maxActionRetries = 0,
+            initialObservationRetryDelayMs = 1L,
+            initialObservationRetryPolicy = InitialObservationRetryPolicy { _, step, observation ->
+                step == 1 &&
+                    observation is ObservationResult.Captured &&
+                    observation.base64Png == "first_black_frame"
+            }
+        )
+
+        assertTrue(engine.startAutomation("s4").ok)
+        assertTrue(callbacks.waitingLatch.await(2, TimeUnit.SECONDS))
+        assertEquals(SessionStatus.WAITING_USER, callbacks.status())
+        assertEquals("模型判断任务可能已完成，但当前界面仍需你确认。", callbacks.waitingQuestion)
+        assertEquals(2, captureCalls.get())
+        val observation = plannedObservation.get() as? ObservationResult.Captured
+        assertEquals("second_real_frame", observation?.base64Png)
+    }
+
+    @Test
+    fun fallsBackToFirstObservationWhenRetryCaptureFails() {
+        val history = AutomationHistory()
+        val callbacks = TestCallbacks(sessionId = "s5", command = "finish once")
+        val captureCalls = AtomicInteger(0)
+        val plannedObservation = AtomicReference<ObservationResult?>(null)
+        val planner = object : PlanningAdapter {
+            override fun modeForSession(sessionId: String): PlanningMode = PlanningMode.MODEL
+
+            override fun planNext(request: PlanningRequest): PlanResult {
+                plannedObservation.set(request.observation)
+                return PlanResult.PlannedAction(GuiAction.Done("done"))
+            }
+
+            override fun clearSession(sessionId: String) = Unit
+        }
+        val firstObservation = ObservationResult.Captured(
+            base64Png = "first_black_frame",
+            width = 1080,
+            height = 1920
+        )
+        val observationProvider = object : ObservationProvider {
+            override fun capture(request: ObservationRequest): ObservationResult {
+                val call = captureCalls.incrementAndGet()
+                return if (call == 1) {
+                    firstObservation
+                } else {
+                    ObservationResult.Failed(
+                        code = "CAPTURE_FAILED",
+                        message = "retry failed"
+                    )
+                }
+            }
+        }
+        val engine = SessionAutomationEngine(
+            callbacks = callbacks,
+            observationProvider = observationProvider,
+            planningAdapter = planner,
+            actionExecutor = FakeExecutor(),
+            history = history,
+            maxSteps = 5,
+            maxActionRetries = 0,
+            initialObservationRetryDelayMs = 1L,
+            initialObservationRetryPolicy = InitialObservationRetryPolicy { _, step, observation ->
+                step == 1 &&
+                    observation is ObservationResult.Captured &&
+                    observation.base64Png == "first_black_frame"
+            }
+        )
+
+        assertTrue(engine.startAutomation("s5").ok)
+        assertTrue(callbacks.waitingLatch.await(2, TimeUnit.SECONDS))
+        assertEquals(SessionStatus.WAITING_USER, callbacks.status())
+        assertEquals("模型判断任务可能已完成，但当前界面仍需你确认。", callbacks.waitingQuestion)
+        assertEquals(2, captureCalls.get())
+        assertEquals(firstObservation, plannedObservation.get())
+    }
+
+    @Test
+    fun clickSettleGateRecapturesWhenFirstAfterFrameIsUnchanged() {
+        val history = AutomationHistory()
+        val callbacks = TestCallbacks(sessionId = "s6", command = "tap once and finish")
+        val stepTwoObservation = AtomicReference<ObservationResult?>(null)
+        val captureCalls = AtomicInteger(0)
+        val frameA = ObservationResult.Captured(
+            base64Png = "frameA",
+            width = 1080,
+            height = 1920
+        )
+        val frameB = ObservationResult.Captured(
+            base64Png = "frameB",
+            width = 1080,
+            height = 1920
+        )
+        val planner = object : PlanningAdapter {
+            override fun modeForSession(sessionId: String): PlanningMode = PlanningMode.MODEL
+
+            override fun planNext(request: PlanningRequest): PlanResult {
+                return when (request.step) {
+                    1 -> PlanResult.PlannedAction(GuiAction.Click(540, 960))
+                    2 -> {
+                        stepTwoObservation.set(request.observation)
+                        PlanResult.PlannedAction(GuiAction.Done("done"))
+                    }
+
+                    else -> PlanResult.PlanFailure(
+                        code = "UNEXPECTED_STEP",
+                        message = "step=${request.step}"
+                    )
+                }
+            }
+
+            override fun clearSession(sessionId: String) = Unit
+        }
+        val observationProvider = object : ObservationProvider {
+            override fun capture(request: ObservationRequest): ObservationResult {
+                return when (captureCalls.incrementAndGet()) {
+                    1 -> frameA
+                    2 -> frameA
+                    3 -> frameB
+                    4 -> frameB
+                    else -> ObservationResult.Failed(
+                        code = "UNEXPECTED_CAPTURE",
+                        message = "call=${captureCalls.get()}"
+                    )
+                }
+            }
+        }
+        val engine = SessionAutomationEngine(
+            callbacks = callbacks,
+            observationProvider = observationProvider,
+            planningAdapter = planner,
+            actionExecutor = FakeExecutor(),
+            history = history,
+            maxSteps = 5,
+            maxActionRetries = 0,
+            postClickSettleDelayMs = 1L,
+            postClickSettleRetryDelayMs = 1L
+        )
+
+        assertTrue(engine.startAutomation("s6").ok)
+        assertTrue(callbacks.waitingLatch.await(2, TimeUnit.SECONDS))
+        assertEquals(SessionStatus.WAITING_USER, callbacks.status())
+        assertEquals("模型判断任务可能已完成，但当前界面仍需你确认。", callbacks.waitingQuestion)
+        assertEquals(4, captureCalls.get())
+        assertEquals(frameB, stepTwoObservation.get())
+    }
+
+    @Test
+    fun sequentialTargetClickCompletesImmediatelyAfterSecondClick() {
+        val history = AutomationHistory()
+        val callbacks = TestCallbacks(
+            sessionId = "s7",
+            command = "点击一次应用选项，点开后再点击一次语燕输入法"
+        )
+        val planCalls = AtomicInteger(0)
+        val observedPhases = mutableListOf<String?>()
+        val planner = object : PlanningAdapter {
+            override fun modeForSession(sessionId: String): PlanningMode = PlanningMode.MODEL
+
+            override fun planNext(request: PlanningRequest): PlanResult {
+                observedPhases += request.controlSnapshot?.currentPhase
+                return when (planCalls.incrementAndGet()) {
+                    1 -> PlanResult.PlannedAction(GuiAction.Click(300, 500))
+                    2 -> PlanResult.PlannedAction(GuiAction.Click(320, 760))
+                    else -> PlanResult.PlanFailure(
+                        code = "UNEXPECTED_STEP",
+                        message = "planner should complete after target click"
+                    )
+                }
+            }
+
+            override fun clearSession(sessionId: String) = Unit
+        }
+        val captureCalls = AtomicInteger(0)
+        val observationProvider = object : ObservationProvider {
+            override fun capture(request: ObservationRequest): ObservationResult {
+                return when (captureCalls.incrementAndGet()) {
+                    1 -> ObservationResult.Captured("ZmFrZS1h", 1080, 1920)
+                    2 -> ObservationResult.Captured("ZmFrZS1i", 1080, 1920)
+                    3 -> ObservationResult.Captured("ZmFrZS1i", 1080, 1920)
+                    4 -> ObservationResult.Captured("ZmFrZS1j", 1080, 1920)
+                    else -> ObservationResult.Failed(
+                        code = "UNEXPECTED_CAPTURE",
+                        message = "call=${captureCalls.get()}"
+                    )
+                }
+            }
+        }
+        val engine = SessionAutomationEngine(
+            callbacks = callbacks,
+            observationProvider = observationProvider,
+            planningAdapter = planner,
+            actionExecutor = FakeExecutor(),
+            history = history,
+            maxSteps = 5,
+            maxActionRetries = 0,
+            postClickSettleDelayMs = 1L,
+            postClickSettleRetryDelayMs = 1L
+        )
+
+        assertTrue(engine.startAutomation("s7").ok)
+        assertTrue(callbacks.completedLatch.await(2, TimeUnit.SECONDS))
+        assertEquals(2, planCalls.get())
+        assertEquals(listOf("NEED_OPEN_PARENT", "NEED_CLICK_TARGET"), observedPhases)
     }
 
     private fun baseSnapshot(sessionId: String, command: String): AutomationSessionSnapshot {

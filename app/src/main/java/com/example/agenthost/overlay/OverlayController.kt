@@ -6,6 +6,7 @@ import android.graphics.Rect
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.provider.Settings
 import android.util.Log
 import android.view.Gravity
@@ -13,10 +14,12 @@ import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
+import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.LinearLayout
 import com.example.agenthost.overlay.view.BubbleView
 import com.example.agenthost.overlay.view.HandoffStripView
+import com.example.agenthost.overlay.view.NewTaskInputView
 import com.example.agenthost.overlay.view.NeedUserCardView
 import com.example.agenthost.session.SessionState
 
@@ -48,8 +51,14 @@ class OverlayController(
         orientation = LinearLayout.VERTICAL
         gravity = Gravity.END
         clipToPadding = false
+        isFocusable = true
+        isFocusableInTouchMode = true
+        descendantFocusability = ViewGroup.FOCUS_BEFORE_DESCENDANTS
     }
     private val bubbleView = BubbleView(appContext)
+    private val newTaskInputView = NewTaskInputView(appContext).apply {
+        visibility = View.GONE
+    }
     private val needUserCardView = NeedUserCardView(appContext).apply {
         visibility = View.GONE
     }
@@ -73,17 +82,29 @@ class OverlayController(
     private var anchorSide = AnchorSide.END
     private var currentSession: SessionState? = null
     private var currentUiState: OverlayUiState = stateMapper.map(null)
+    private val postCompletionRetention = OverlayPostCompletionRetention(
+        nowMs = { SystemClock.elapsedRealtime() }
+    )
+    private var dismissedPostCompletionSessionId: String? = null
     private var snoozedSessionId: String? = null
     private var acknowledgedHandoffSessionId: String? = null
     private var replyDraftSessionId: String? = null
     private var replyDraft: String = OverlayUiState.DEFAULT_REPLY_TEXT
-    private var windowReplyInteractive = false
+    private var newTaskDraft: String = ""
+    private var windowInteractive = false
     private var dragging = false
     private var longPressTriggered = false
     private var downRawX = 0f
     private var downRawY = 0f
     private var downX = 0
     private var downY = 0
+    private val clearRetainedPostCompletionRunnable = Runnable {
+        if (postCompletionRetention.expireIfNeeded()) {
+            render(currentSession)
+        } else {
+            scheduleRetainedPostCompletionExpiry()
+        }
+    }
 
     private val longPressRunnable = Runnable {
         longPressTriggered = true
@@ -105,10 +126,17 @@ class OverlayController(
                 LinearLayout.LayoutParams.WRAP_CONTENT
             )
         )
+        rootView.addView(newTaskInputView, cardLayoutParams)
         rootView.addView(needUserCardView, cardLayoutParams)
         rootView.addView(handoffStripView, cardLayoutParams)
         bubbleView.setOnClickListener { toggleExpansionFromBubble() }
         bubbleView.setOnTouchListener(::handleBubbleTouch)
+        newTaskInputView.setPrimaryClickListener { handleNewTaskPrimary() }
+        newTaskInputView.setSecondaryClickListener { handleNewTaskSecondary() }
+        newTaskInputView.setOnInputChangedListener { text ->
+            newTaskDraft = text
+            bindNewTaskPanel(currentUiState)
+        }
         needUserCardView.setPrimaryClickListener { handleNeedUserPrimary() }
         needUserCardView.setSecondaryClickListener { handleNeedUserSecondary() }
         handoffStripView.setPrimaryClickListener { handleHandoffPrimary() }
@@ -152,10 +180,13 @@ class OverlayController(
 
     fun render(session: SessionState?) {
         currentSession = session
-        val mapped = stateMapper.map(session)
+        val mapped = resolvePresentedState(session, stateMapper.map(session))
         syncLocalUiState(mapped)
         currentUiState = mapped
         val showPromptPanel = shouldShowPromptPanel(mapped)
+        val showNewTaskPanel = isExpanded &&
+            !showPromptPanel &&
+            mapped.newTaskEntryState != NewTaskEntryState.HIDDEN
         val showHandoffStrip = showPromptPanel &&
             mapped.mode == OverlayMode.HANDOFF_ACTIVE &&
             acknowledgedHandoffSessionId == mapped.sessionId
@@ -163,12 +194,19 @@ class OverlayController(
             mapped.mode in setOf(
                 OverlayMode.NEED_USER,
                 OverlayMode.HANDOFF_ACTIVE,
-                OverlayMode.RECOVERY
+                OverlayMode.RECOVERY,
+                OverlayMode.POST_COMPLETION
             )
-        val bubbleExpanded = isExpanded && !showPromptPanel &&
+        val bubbleExpanded = isExpanded && !showPromptPanel && !showNewTaskPanel &&
             mapped.mode in setOf(OverlayMode.IDLE, OverlayMode.RUNNING)
 
         bubbleView.bind(mapped, bubbleExpanded)
+        if (showNewTaskPanel) {
+            bindNewTaskPanel(mapped)
+            newTaskInputView.visibility = View.VISIBLE
+        } else {
+            newTaskInputView.visibility = View.GONE
+        }
         if (showNeedUserPanel) {
             needUserCardView.bind(
                 title = mapped.title.orEmpty(),
@@ -198,10 +236,39 @@ class OverlayController(
         } else {
             Gravity.START
         }
-        updateWindowInteractivity(showHandoffStrip)
+        updateWindowInteractivity(
+            showHandoffStrip ||
+                showNeedUserPanel ||
+                (showNewTaskPanel && mapped.newTaskEntryState == NewTaskEntryState.AVAILABLE)
+        )
+        scheduleRetainedPostCompletionExpiry()
         if (isAttached) {
             rootView.post { snapToEdge() }
         }
+    }
+
+    private fun resolvePresentedState(session: SessionState?, mapped: OverlayUiState): OverlayUiState {
+        if (session != null &&
+            mapped.mode == OverlayMode.POST_COMPLETION &&
+            session.sessionId == dismissedPostCompletionSessionId
+        ) {
+            postCompletionRetention.dismiss()
+            handler.removeCallbacks(clearRetainedPostCompletionRunnable)
+            return stateMapper.map(null)
+        }
+        if (session != null &&
+            mapped.mode != OverlayMode.POST_COMPLETION &&
+            session.sessionId != dismissedPostCompletionSessionId
+        ) {
+            dismissedPostCompletionSessionId = null
+        }
+        return postCompletionRetention.resolve(sessionPresent = session != null, mapped = mapped)
+    }
+
+    private fun scheduleRetainedPostCompletionExpiry() {
+        handler.removeCallbacks(clearRetainedPostCompletionRunnable)
+        val remaining = postCompletionRetention.remainingMs() ?: return
+        handler.postDelayed(clearRetainedPostCompletionRunnable, remaining)
     }
 
     private fun syncLocalUiState(mapped: OverlayUiState) {
@@ -210,7 +277,14 @@ class OverlayController(
         val interactive = mapped.mode in setOf(
             OverlayMode.NEED_USER,
             OverlayMode.HANDOFF_ACTIVE,
-            OverlayMode.RECOVERY
+            OverlayMode.RECOVERY,
+            OverlayMode.POST_COMPLETION
+        )
+        val wasInteractive = currentUiState.mode in setOf(
+            OverlayMode.NEED_USER,
+            OverlayMode.HANDOFF_ACTIVE,
+            OverlayMode.RECOVERY,
+            OverlayMode.POST_COMPLETION
         )
         val sessionChanged = previousSessionId != newSessionId
         val modeChanged = currentUiState.mode != mapped.mode
@@ -220,6 +294,7 @@ class OverlayController(
             acknowledgedHandoffSessionId = null
             replyDraftSessionId = null
             replyDraft = OverlayUiState.DEFAULT_REPLY_TEXT
+            newTaskDraft = ""
         }
 
         if (mapped.mode != OverlayMode.HANDOFF_ACTIVE && acknowledgedHandoffSessionId == newSessionId) {
@@ -236,8 +311,12 @@ class OverlayController(
         }
 
         if (!interactive) {
-            isExpanded = false
-            snoozedSessionId = null
+            if (sessionChanged || wasInteractive) {
+                isExpanded = false
+            }
+            if (wasInteractive) {
+                snoozedSessionId = null
+            }
             return
         }
 
@@ -248,7 +327,13 @@ class OverlayController(
 
     private fun toggleExpansionFromBubble() {
         val state = currentUiState
-        if (state.mode in setOf(OverlayMode.NEED_USER, OverlayMode.HANDOFF_ACTIVE, OverlayMode.RECOVERY)) {
+        if (state.mode in setOf(
+                OverlayMode.NEED_USER,
+                OverlayMode.HANDOFF_ACTIVE,
+                OverlayMode.RECOVERY,
+                OverlayMode.POST_COMPLETION
+            )
+        ) {
             if (snoozedSessionId == state.sessionId) {
                 snoozedSessionId = null
             }
@@ -260,13 +345,17 @@ class OverlayController(
     }
 
     private fun handleNeedUserPrimary() {
+        if (currentUiState.mode == OverlayMode.POST_COMPLETION) {
+            dismissPostCompletion()
+            return
+        }
         val session = currentSession ?: return
         when (currentUiState.mode) {
             OverlayMode.NEED_USER -> {
                 if (currentUiState.alreadyOnMain) {
                     isExpanded = false
                 } else {
-                    actionDispatcher.requestMoveToMain(session)
+                    actionDispatcher.requestMoveToMain(session.sessionId, currentUiState)
                 }
             }
 
@@ -280,7 +369,14 @@ class OverlayController(
             }
 
             OverlayMode.RECOVERY -> {
-                actionDispatcher.requestRecoveryPrimary(session)
+                if (currentUiState.alreadyOnMain &&
+                    !session.migratedToMain &&
+                    !OverlayRecoverySupport.shouldFallbackToIdle(session)
+                ) {
+                    isExpanded = false
+                } else {
+                    actionDispatcher.requestRecoveryPrimary(session.sessionId, currentUiState)
+                }
             }
 
             else -> Unit
@@ -288,14 +384,41 @@ class OverlayController(
         render(currentSession)
     }
 
+    private fun handleNewTaskPrimary() {
+        if (currentUiState.newTaskEntryState != NewTaskEntryState.AVAILABLE) {
+            return
+        }
+        val command = newTaskInputView.currentInputText().trim()
+        if (command.isBlank()) {
+            return
+        }
+        newTaskDraft = command
+        actionDispatcher.submitNewTask(command)
+    }
+
+    private fun handleNewTaskSecondary() {
+        isExpanded = false
+        render(currentSession)
+    }
+
     private fun handleNeedUserSecondary() {
-        if (currentUiState.mode == OverlayMode.RECOVERY) {
-            actionDispatcher.cancelSession()
+        if (currentUiState.mode == OverlayMode.POST_COMPLETION) {
+            dismissPostCompletion()
+        } else if (currentUiState.mode == OverlayMode.RECOVERY) {
+            actionDispatcher.cancelSession(currentSession?.sessionId, currentUiState)
         } else {
             snoozedSessionId = currentUiState.sessionId
             isExpanded = false
             render(currentSession)
         }
+    }
+
+    private fun dismissPostCompletion() {
+        dismissedPostCompletionSessionId = currentUiState.sessionId
+        postCompletionRetention.dismiss()
+        handler.removeCallbacks(clearRetainedPostCompletionRunnable)
+        isExpanded = false
+        render(currentSession)
     }
 
     private fun handleHandoffPrimary() {
@@ -304,11 +427,11 @@ class OverlayController(
             .trim()
             .ifBlank { currentUiState.defaultReplyText }
         replyDraft = reply
-        actionDispatcher.submitReply(session.sessionId, reply)
+        actionDispatcher.submitReply(session.sessionId, reply, currentUiState)
     }
 
     private fun handleHandoffSecondary() {
-        actionDispatcher.cancelSession()
+        actionDispatcher.cancelSession(currentSession?.sessionId, currentUiState)
     }
 
     private fun shouldShowPromptPanel(state: OverlayUiState): Boolean {
@@ -318,19 +441,40 @@ class OverlayController(
         return state.mode in setOf(
             OverlayMode.NEED_USER,
             OverlayMode.HANDOFF_ACTIVE,
-            OverlayMode.RECOVERY
+            OverlayMode.RECOVERY,
+            OverlayMode.POST_COMPLETION
         )
     }
 
-    private fun updateWindowInteractivity(replyInteractive: Boolean) {
-        if (windowReplyInteractive == replyInteractive) {
+    private fun bindNewTaskPanel(state: OverlayUiState) {
+        val inputEnabled = state.newTaskEntryState == NewTaskEntryState.AVAILABLE
+        val draft = newTaskDraft
+        newTaskInputView.bind(
+            title = "新任务",
+            message = state.newTaskMessage.orEmpty(),
+            hint = state.newTaskHint,
+            inputText = draft,
+            inputEnabled = inputEnabled,
+            primaryEnabled = inputEnabled && draft.trim().isNotEmpty(),
+            primaryLabel = "开始",
+            secondaryLabel = "收起"
+        )
+    }
+
+    private fun updateWindowInteractivity(inputInteractive: Boolean) {
+        if (windowInteractive == inputInteractive) {
             return
         }
-        windowReplyInteractive = replyInteractive
-        layoutParams.flags = baseWindowFlags(replyInteractive)
+        windowInteractive = inputInteractive
+        layoutParams.flags = baseWindowFlags(inputInteractive)
         if (isAttached) {
             try {
                 windowManager.updateViewLayout(rootView, layoutParams)
+                if (inputInteractive) {
+                    // Keep initial focus on the overlay container so cards with EditText
+                    // do not auto-pop the IME when the window becomes interactive.
+                    rootView.requestFocus()
+                }
             } catch (t: Throwable) {
                 Log.w(TAG, "failed to update overlay interactivity", t)
             }

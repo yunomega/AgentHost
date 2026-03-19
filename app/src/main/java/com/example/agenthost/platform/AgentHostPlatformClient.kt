@@ -43,6 +43,25 @@ interface PlatformAutomationGateway {
     ): PlatformActionResponse
 }
 
+interface ExecutionDisplayPolicyGateway {
+    fun registerExecutionDisplaySession(
+        sessionId: String,
+        executionDisplayId: Int
+    ): ExecutionDisplayPolicyResponse
+
+    fun updateExecutionDisplaySessionState(
+        sessionId: String,
+        executionDisplayId: Int,
+        state: String,
+        reason: String
+    ): ExecutionDisplayPolicyResponse
+
+    fun clearExecutionDisplaySession(
+        sessionId: String,
+        reason: String
+    ): ExecutionDisplayPolicyResponse
+}
+
 data class PlatformCaptureResponse(
     val ok: Boolean,
     val code: String,
@@ -53,6 +72,12 @@ data class PlatformCaptureResponse(
 )
 
 data class PlatformActionResponse(
+    val ok: Boolean,
+    val code: String,
+    val details: String
+)
+
+data class ExecutionDisplayPolicyResponse(
     val ok: Boolean,
     val code: String,
     val details: String
@@ -82,7 +107,7 @@ class AgentHostPlatformClient(
     private val actionTimeoutMs: Long = 2_000L,
     private val binderExecutor: ExecutorService = Executors.newCachedThreadPool(),
     private val pipeReadTimeoutMs: Long = captureTimeoutMs
-) : PlatformAutomationGateway {
+) : PlatformAutomationGateway, ExecutionDisplayPolicyGateway {
     companion object {
         private const val TAG = "AgentHostPlatformClient"
         private const val SERVICE_NAME = "agenthost_platform"
@@ -122,6 +147,139 @@ class AgentHostPlatformClient(
             )
         } catch (t: Throwable) {
             exceptionCapture(sessionId, displayId, "CAPTURE", t)
+        }
+    }
+
+    override fun registerExecutionDisplaySession(
+        sessionId: String,
+        executionDisplayId: Int
+    ): ExecutionDisplayPolicyResponse {
+        logPolicyBegin(
+            sessionId = sessionId,
+            executionDisplayId = executionDisplayId,
+            actionType = "REGISTER_EXECUTION_DISPLAY_SESSION",
+            extras = "state=EXECUTION"
+        )
+        val service = resolveService() ?: return unavailablePolicy(
+            sessionId = sessionId,
+            executionDisplayId = executionDisplayId,
+            actionType = "REGISTER_EXECUTION_DISPLAY_SESSION"
+        )
+        return try {
+            toExecutionDisplayPolicyResponse(
+                sessionId = sessionId,
+                executionDisplayId = executionDisplayId,
+                actionType = "REGISTER_EXECUTION_DISPLAY_SESSION",
+                result = callWithTimeout(
+                    sessionId = sessionId,
+                    displayId = executionDisplayId,
+                    actionType = "REGISTER_EXECUTION_DISPLAY_SESSION",
+                    timeoutMs = actionTimeoutMs
+                ) {
+                    service.registerExecutionDisplaySession(sessionId, executionDisplayId)
+                }
+            )
+        } catch (_: TimeoutException) {
+            failurePolicy(
+                sessionId = sessionId,
+                executionDisplayId = executionDisplayId,
+                actionType = "REGISTER_EXECUTION_DISPLAY_SESSION",
+                code = PlatformResultCodes.INTERNAL_ERROR,
+                details = "platform call timeout after ${actionTimeoutMs}ms"
+            )
+        } catch (t: Throwable) {
+            exceptionPolicy(sessionId, executionDisplayId, "REGISTER_EXECUTION_DISPLAY_SESSION", t)
+        }
+    }
+
+    override fun updateExecutionDisplaySessionState(
+        sessionId: String,
+        executionDisplayId: Int,
+        state: String,
+        reason: String
+    ): ExecutionDisplayPolicyResponse {
+        logPolicyBegin(
+            sessionId = sessionId,
+            executionDisplayId = executionDisplayId,
+            actionType = "UPDATE_EXECUTION_DISPLAY_SESSION",
+            extras = "state=$state reason=$reason"
+        )
+        val service = resolveService() ?: return unavailablePolicy(
+            sessionId = sessionId,
+            executionDisplayId = executionDisplayId,
+            actionType = "UPDATE_EXECUTION_DISPLAY_SESSION"
+        )
+        return try {
+            toExecutionDisplayPolicyResponse(
+                sessionId = sessionId,
+                executionDisplayId = executionDisplayId,
+                actionType = "UPDATE_EXECUTION_DISPLAY_SESSION",
+                result = callWithTimeout(
+                    sessionId = sessionId,
+                    displayId = executionDisplayId,
+                    actionType = "UPDATE_EXECUTION_DISPLAY_SESSION",
+                    timeoutMs = actionTimeoutMs
+                ) {
+                    service.updateExecutionDisplaySessionState(
+                        sessionId,
+                        executionDisplayId,
+                        state,
+                        reason
+                    )
+                }
+            )
+        } catch (_: TimeoutException) {
+            failurePolicy(
+                sessionId = sessionId,
+                executionDisplayId = executionDisplayId,
+                actionType = "UPDATE_EXECUTION_DISPLAY_SESSION",
+                code = PlatformResultCodes.INTERNAL_ERROR,
+                details = "platform call timeout after ${actionTimeoutMs}ms"
+            )
+        } catch (t: Throwable) {
+            exceptionPolicy(sessionId, executionDisplayId, "UPDATE_EXECUTION_DISPLAY_SESSION", t)
+        }
+    }
+
+    override fun clearExecutionDisplaySession(
+        sessionId: String,
+        reason: String
+    ): ExecutionDisplayPolicyResponse {
+        logPolicyBegin(
+            sessionId = sessionId,
+            executionDisplayId = -1,
+            actionType = "CLEAR_EXECUTION_DISPLAY_SESSION",
+            extras = "reason=$reason"
+        )
+        val service = resolveService() ?: return unavailablePolicy(
+            sessionId = sessionId,
+            executionDisplayId = -1,
+            actionType = "CLEAR_EXECUTION_DISPLAY_SESSION"
+        )
+        return try {
+            toExecutionDisplayPolicyResponse(
+                sessionId = sessionId,
+                executionDisplayId = -1,
+                actionType = "CLEAR_EXECUTION_DISPLAY_SESSION",
+                result = callWithTimeout(
+                    sessionId = sessionId,
+                    displayId = -1,
+                    actionType = "CLEAR_EXECUTION_DISPLAY_SESSION",
+                    timeoutMs = actionTimeoutMs
+                ) {
+                    service.clearExecutionDisplaySession(sessionId, reason)
+                }
+            )
+        } catch (_: TimeoutException) {
+            failurePolicy(
+                sessionId = sessionId,
+                executionDisplayId = -1,
+                actionType = "CLEAR_EXECUTION_DISPLAY_SESSION",
+                code = PlatformResultCodes.INTERNAL_ERROR,
+                details = "platform call timeout after ${actionTimeoutMs}ms"
+            )
+        } catch (t: Throwable) {
+            exceptionPolicy(sessionId, -1, "CLEAR_EXECUTION_DISPLAY_SESSION", t)
         }
     }
 
@@ -379,6 +537,33 @@ class AgentHostPlatformClient(
         return PlatformActionResponse(ok = true, code = code, details = details)
     }
 
+    private fun toExecutionDisplayPolicyResponse(
+        sessionId: String,
+        executionDisplayId: Int,
+        actionType: String,
+        result: Bundle?
+    ): ExecutionDisplayPolicyResponse {
+        if (result == null) {
+            return failurePolicy(
+                sessionId = sessionId,
+                executionDisplayId = executionDisplayId,
+                actionType = actionType,
+                code = PlatformResultCodes.INTERNAL_ERROR,
+                details = "null bundle"
+            )
+        }
+        val code = result.getString(PlatformBundleKeys.CODE).orEmpty()
+            .ifEmpty { PlatformResultCodes.INTERNAL_ERROR }
+        val details = result.getString(PlatformBundleKeys.DETAILS).orEmpty()
+            .ifEmpty { "no details" }
+        val ok = isExecutionDisplayPolicySuccess(code)
+        if (!ok) {
+            return failurePolicy(sessionId, executionDisplayId, actionType, code, details)
+        }
+        logPolicySuccess(sessionId, executionDisplayId, actionType, "details=$details code=$code")
+        return ExecutionDisplayPolicyResponse(ok = true, code = code, details = details)
+    }
+
     private fun unavailableCapture(
         sessionId: String,
         displayId: Int,
@@ -407,6 +592,20 @@ class AgentHostPlatformClient(
         )
     }
 
+    private fun unavailablePolicy(
+        sessionId: String,
+        executionDisplayId: Int,
+        actionType: String
+    ): ExecutionDisplayPolicyResponse {
+        return failurePolicy(
+            sessionId = sessionId,
+            executionDisplayId = executionDisplayId,
+            actionType = actionType,
+            code = PlatformResultCodes.UNSUPPORTED,
+            details = "agenthost_platform service unavailable"
+        )
+    }
+
     private fun exceptionCapture(
         sessionId: String,
         displayId: Int,
@@ -425,6 +624,22 @@ class AgentHostPlatformClient(
     ): PlatformActionResponse {
         val details = error.message ?: error.javaClass.simpleName
         return failureAction(sessionId, displayId, actionType, PlatformResultCodes.INTERNAL_ERROR, details)
+    }
+
+    private fun exceptionPolicy(
+        sessionId: String,
+        executionDisplayId: Int,
+        actionType: String,
+        error: Throwable
+    ): ExecutionDisplayPolicyResponse {
+        val details = error.message ?: error.javaClass.simpleName
+        return failurePolicy(
+            sessionId = sessionId,
+            executionDisplayId = executionDisplayId,
+            actionType = actionType,
+            code = PlatformResultCodes.INTERNAL_ERROR,
+            details = details
+        )
     }
 
     private fun failureCapture(
@@ -447,6 +662,17 @@ class AgentHostPlatformClient(
     ): PlatformActionResponse {
         logFailed(sessionId, displayId, actionType, code, details)
         return PlatformActionResponse(ok = false, code = code, details = details)
+    }
+
+    private fun failurePolicy(
+        sessionId: String,
+        executionDisplayId: Int,
+        actionType: String,
+        code: String,
+        details: String
+    ): ExecutionDisplayPolicyResponse {
+        logPolicyFailed(sessionId, executionDisplayId, actionType, code, details)
+        return ExecutionDisplayPolicyResponse(ok = false, code = code, details = details)
     }
 
     private fun readBytesWithTimeout(
@@ -519,6 +745,59 @@ class AgentHostPlatformClient(
                 "${displayAliasToken(actionType, displayId)} " +
                 "sessionTaskId=-1 step=0 actionType=$actionType code=CALL_OK extras=$extras"
         )
+    }
+
+    private fun logPolicyBegin(
+        sessionId: String,
+        executionDisplayId: Int,
+        actionType: String,
+        extras: String
+    ) {
+        AgentHostLog.i(
+            TAG,
+            "event=platform_policy_call_begin sessionId=$sessionId " +
+                "executionDisplayId=$executionDisplayId sessionTaskId=-1 step=0 " +
+                "actionType=$actionType code=CALL_BEGIN extras=$extras"
+        )
+    }
+
+    private fun logPolicySuccess(
+        sessionId: String,
+        executionDisplayId: Int,
+        actionType: String,
+        extras: String
+    ) {
+        AgentHostLog.i(
+            TAG,
+            "event=platform_policy_call_success sessionId=$sessionId " +
+                "executionDisplayId=$executionDisplayId sessionTaskId=-1 step=0 " +
+                "actionType=$actionType code=CALL_OK extras=$extras"
+        )
+    }
+
+    private fun logPolicyFailed(
+        sessionId: String,
+        executionDisplayId: Int,
+        actionType: String,
+        code: String,
+        details: String
+    ) {
+        val message = "event=platform_policy_call_failed sessionId=$sessionId " +
+            "executionDisplayId=$executionDisplayId sessionTaskId=-1 step=0 " +
+            "actionType=$actionType code=$code extras=details=$details"
+        if (code == PlatformResultCodes.PERMISSION_DENIED || code == PlatformResultCodes.INTERNAL_ERROR) {
+            AgentHostLog.e(TAG, message)
+        } else {
+            AgentHostLog.w(TAG, message)
+        }
+    }
+
+    private fun isExecutionDisplayPolicySuccess(code: String): Boolean {
+        return code == "EXECUTION_SESSION_REGISTERED" ||
+            code == "EXECUTION_SESSION_UPDATED" ||
+            code == "EXECUTION_SESSION_UNCHANGED" ||
+            code == "EXECUTION_SESSION_CLEARED" ||
+            code == "EXECUTION_SESSION_ALREADY_CLEARED"
     }
 
     private fun displayAliasToken(actionType: String, displayId: Int): String {

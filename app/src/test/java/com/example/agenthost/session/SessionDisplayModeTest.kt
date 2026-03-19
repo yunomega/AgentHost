@@ -45,6 +45,7 @@ class SessionDisplayModeTest {
             visibleToUser = true,
             backgroundPreferred = false,
             returnToVirtualAfterUser = false,
+            completionReturnPolicy = CompletionReturnPolicy.CURRENT_BEHAVIOR,
             pendingReturnToVirtualDisplay = false,
             migratedToMain = false,
             lastMigrationCode = null,
