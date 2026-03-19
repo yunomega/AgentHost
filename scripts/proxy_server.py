@@ -79,6 +79,12 @@ class GatewayError:
         return jsonify(body), self.status
 
 
+@dataclass(frozen=True)
+class SanitizedModelOutput:
+    output_text: str
+    sanitizer_path: str
+
+
 def get_env_int(name: str, default: int, minimum: int) -> int:
     raw = os.getenv(name, str(default)).strip()
     try:
@@ -779,6 +785,7 @@ def normalize_sanitized_action(
     json_object: str,
     observation: dict[str, Any] | None,
     *,
+    sanitizer_path: str,
     raw_model_action: str | None,
     source_model: str,
     source_mode: str,
@@ -799,6 +806,7 @@ def normalize_sanitized_action(
     meta.update(
         {
             "coordSpace": coord_space,
+            "sanitizerPath": sanitizer_path,
             "sourceModel": source_model,
             "sourceMode": source_mode,
             "rawModelAction": raw_model_action or json_object,
@@ -808,41 +816,97 @@ def normalize_sanitized_action(
     return compact_json(normalized)
 
 
+def extract_direct_json_object(text: str) -> str | None:
+    candidate = text.strip()
+    if not candidate:
+        return None
+    try:
+        parsed = json.loads(candidate)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    return candidate
+
+
 def sanitize_model_output(
     raw_text: str,
     observation: dict[str, Any] | None = None,
     *,
     source_model: str,
     source_mode: str,
-) -> str | None:
+) -> SanitizedModelOutput | None:
+    raw_object = extract_direct_json_object(raw_text)
+    if raw_object:
+        return SanitizedModelOutput(
+            output_text=normalize_sanitized_action(
+                raw_object,
+                observation,
+                sanitizer_path="direct_valid",
+                raw_model_action=raw_text,
+                source_model=source_model,
+                source_mode=source_mode,
+            ),
+            sanitizer_path="direct_valid",
+        )
+
     cleaned = strip_markdown_fences(raw_text)
+    cleaned_object = extract_direct_json_object(cleaned)
+    if cleaned_object:
+        return SanitizedModelOutput(
+            output_text=normalize_sanitized_action(
+                cleaned_object,
+                observation,
+                sanitizer_path="json_extract",
+                raw_model_action=raw_text,
+                source_model=source_model,
+                source_mode=source_mode,
+            ),
+            sanitizer_path="json_extract",
+        )
+
     json_object = extract_first_json_object(cleaned)
     if json_object:
-        return normalize_sanitized_action(
-            json_object,
-            observation,
-            raw_model_action=raw_text,
-            source_model=source_model,
-            source_mode=source_mode,
+        return SanitizedModelOutput(
+            output_text=normalize_sanitized_action(
+                json_object,
+                observation,
+                sanitizer_path="json_extract",
+                raw_model_action=raw_text,
+                source_model=source_model,
+                source_mode=source_mode,
+            ),
+            sanitizer_path="json_extract",
         )
+
     repaired_object = extract_repaired_action_object(cleaned)
     if repaired_object:
-        return normalize_sanitized_action(
-            repaired_object,
-            observation,
-            raw_model_action=raw_text,
-            source_model=source_model,
-            source_mode=source_mode,
+        return SanitizedModelOutput(
+            output_text=normalize_sanitized_action(
+                repaired_object,
+                observation,
+                sanitizer_path="repair",
+                raw_model_action=raw_text,
+                source_model=source_model,
+                source_mode=source_mode,
+            ),
+            sanitizer_path="repair",
         )
+
     legacy_object = extract_legacy_action_object(cleaned)
     if legacy_object:
-        return normalize_sanitized_action(
-            legacy_object,
-            observation,
-            raw_model_action=raw_text,
-            source_model=source_model,
-            source_mode=source_mode,
+        return SanitizedModelOutput(
+            output_text=normalize_sanitized_action(
+                legacy_object,
+                observation,
+                sanitizer_path="legacy_parse",
+                raw_model_action=raw_text,
+                source_model=source_model,
+                source_mode=source_mode,
+            ),
+            sanitizer_path="legacy_parse",
         )
+
     return None
 
 
@@ -862,7 +926,7 @@ class UpstreamAdapter:
 
     def sanitize_output(
         self, model_text: str, payload: dict[str, Any], settings: Settings
-    ) -> str | None:
+    ) -> SanitizedModelOutput | None:
         raise NotImplementedError
 
 
@@ -882,7 +946,7 @@ class OpenAiCompatibleAdapter(UpstreamAdapter):
 
     def sanitize_output(
         self, model_text: str, payload: dict[str, Any], settings: Settings
-    ) -> str | None:
+    ) -> SanitizedModelOutput | None:
         context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
         observation = (
             context.get("observation") if isinstance(context.get("observation"), dict) else {}
@@ -1059,8 +1123,12 @@ def plan():
     if not sanitized:
         return build_no_json_response(model_text, upstream_response.status_code)
 
-    log_line(f"sanitized outputText {truncate_text(sanitized, SETTINGS.log_body_chars)}")
-    return jsonify({"outputText": sanitized}), HTTPStatus.OK
+    log_line(
+        "sanitized outputText "
+        f"path={sanitized.sanitizer_path} "
+        f"{truncate_text(sanitized.output_text, SETTINGS.log_body_chars)}"
+    )
+    return jsonify({"outputText": sanitized.output_text}), HTTPStatus.OK
 
 
 def main() -> int:

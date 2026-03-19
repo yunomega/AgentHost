@@ -1,8 +1,13 @@
 package com.example.agenthost.automation
 
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Color
 import com.example.agenthost.core.AgentHostLog
+import com.example.agenthost.debug.TaskRunReportHooks
 import com.example.agenthost.runtime.VirtualDisplayRuntime
 import com.example.agenthost.session.SessionStatus
+import java.util.Base64
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -14,6 +19,132 @@ private data class LoopControl(
     var future: Future<*>?
 )
 
+fun interface InitialObservationRetryPolicy {
+    fun shouldRetry(
+        snapshot: AutomationSessionSnapshot,
+        step: Int,
+        observation: ObservationResult
+    ): Boolean
+}
+
+private object ObservationBitmapUtils {
+    private const val TARGET_MAX_SAMPLE_DIMENSION = 24
+    private const val MAX_BLACK_LUMA = 12
+    private const val MAX_SETTLE_MEAN_LUMA_DIFF = 6.0
+
+    fun isLikelyNearBlackSingleColorFrame(observation: ObservationResult.Captured): Boolean {
+        val bitmap = tryDecodeBitmap(observation) ?: return false
+        return try {
+            if (bitmap.width <= 0 || bitmap.height <= 0) {
+                return false
+            }
+            val firstColor = bitmap.getPixel(0, 0)
+            if (luma(firstColor) > MAX_BLACK_LUMA) {
+                return false
+            }
+            for (y in 0 until bitmap.height) {
+                for (x in 0 until bitmap.width) {
+                    val color = bitmap.getPixel(x, y)
+                    if (color != firstColor || luma(color) > MAX_BLACK_LUMA) {
+                        return false
+                    }
+                }
+            }
+            true
+        } finally {
+            bitmap.recycle()
+        }
+    }
+
+    fun areNearlyUnchanged(
+        before: ObservationResult.Captured,
+        after: ObservationResult.Captured
+    ): Boolean {
+        if (before.width != after.width || before.height != after.height) {
+            return false
+        }
+        val beforeBitmap = tryDecodeBitmap(before)
+        val afterBitmap = tryDecodeBitmap(after)
+        if (beforeBitmap == null || afterBitmap == null) {
+            beforeBitmap?.recycle()
+            afterBitmap?.recycle()
+            return before.base64Png == after.base64Png
+        }
+        return try {
+            if (beforeBitmap.width != afterBitmap.width || beforeBitmap.height != afterBitmap.height) {
+                return false
+            }
+            val pixelCount = beforeBitmap.width * beforeBitmap.height
+            if (pixelCount <= 0) {
+                return before.base64Png == after.base64Png
+            }
+            var totalDiff = 0L
+            for (y in 0 until beforeBitmap.height) {
+                for (x in 0 until beforeBitmap.width) {
+                    totalDiff += kotlin.math.abs(
+                        luma(beforeBitmap.getPixel(x, y)) - luma(afterBitmap.getPixel(x, y))
+                    )
+                }
+            }
+            val meanDiff = totalDiff.toDouble() / pixelCount.toDouble()
+            meanDiff <= MAX_SETTLE_MEAN_LUMA_DIFF
+        } finally {
+            beforeBitmap.recycle()
+            afterBitmap.recycle()
+        }
+    }
+
+    private fun tryDecodeBitmap(observation: ObservationResult.Captured): Bitmap? {
+        return try {
+            val pngBytes = Base64.getDecoder().decode(observation.base64Png)
+            if (pngBytes.isEmpty()) {
+                return null
+            }
+            BitmapFactory.decodeByteArray(
+                pngBytes,
+                0,
+                pngBytes.size,
+                BitmapFactory.Options().apply {
+                    inPreferredConfig = Bitmap.Config.ARGB_8888
+                    inSampleSize = calculateSampleSize(observation.width, observation.height)
+                }
+            )
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    private fun calculateSampleSize(width: Int, height: Int): Int {
+        val maxDimension = maxOf(width, height)
+        if (maxDimension <= TARGET_MAX_SAMPLE_DIMENSION) {
+            return 1
+        }
+        var sampleSize = 1
+        while (maxDimension / sampleSize > TARGET_MAX_SAMPLE_DIMENSION) {
+            sampleSize *= 2
+        }
+        return sampleSize
+    }
+
+    private fun luma(color: Int): Int {
+        return (Color.red(color) * 299 + Color.green(color) * 587 + Color.blue(color) * 114) / 1000
+    }
+}
+
+private object DefaultInitialObservationRetryPolicy : InitialObservationRetryPolicy {
+    override fun shouldRetry(
+        snapshot: AutomationSessionSnapshot,
+        step: Int,
+        observation: ObservationResult
+    ): Boolean {
+        if (step != 1 || snapshot.virtualDisplayId == null) {
+            return false
+        }
+        val captured = observation as? ObservationResult.Captured ?: return false
+        return ObservationBitmapUtils.isLikelyNearBlackSingleColorFrame(captured)
+    }
+}
+
 data class EngineResult(
     val ok: Boolean,
     val code: String,
@@ -24,11 +155,14 @@ data class AutomationSessionSnapshot(
     val sessionId: String,
     val command: String,
     val executionDisplayId: Int,
-    val virtualDisplayId: Int?,
-    val surfaceDisplayId: Int?,
+    val currentVisibleDisplayId: Int? = null,
+    val virtualDisplayId: Int? = null,
+    val surfaceDisplayId: Int? = null,
     val sessionTaskId: Int,
     val status: SessionStatus,
-    val runtimeHandle: VirtualDisplayRuntime.RuntimeHandle?
+    val lastKnownTopActivity: String? = null,
+    val lastKnownTopPackage: String? = null,
+    val runtimeHandle: VirtualDisplayRuntime.RuntimeHandle? = null
 )
 
 interface AutomationStateCallbacks {
@@ -47,9 +181,15 @@ class SessionAutomationEngine(
     private val planningAdapter: PlanningAdapter,
     private val actionExecutor: DisplayActionExecutor,
     private val history: AutomationHistory,
+    private val controlCoordinator: AgentControlCoordinator = AgentControlCoordinator(),
     private val maxSteps: Int = 30,
     private val maxActionRetries: Int = 2,
-    private val worker: ExecutorService = Executors.newCachedThreadPool()
+    private val worker: ExecutorService = Executors.newCachedThreadPool(),
+    private val postClickSettleDelayMs: Long = 250L,
+    private val postClickSettleRetryDelayMs: Long = 250L,
+    private val initialObservationRetryDelayMs: Long = 250L,
+    private val initialObservationRetryPolicy: InitialObservationRetryPolicy =
+        DefaultInitialObservationRetryPolicy
 ) {
     companion object {
         private const val TAG = "SessionAutomationEngine"
@@ -128,6 +268,12 @@ class SessionAutomationEngine(
         return startAutomation(sessionId)
     }
 
+    fun finishSession(sessionId: String) {
+        planningAdapter.clearSession(sessionId)
+        history.clearSession(sessionId)
+        controlCoordinator.clearSession(sessionId)
+    }
+
     fun stopAutomation(sessionId: String): EngineResult {
         val control = loops[sessionId]
             ?: return EngineResult(true, "AUTOMATION_NOT_RUNNING")
@@ -140,6 +286,7 @@ class SessionAutomationEngine(
         stopAutomation(sessionId)
         planningAdapter.clearSession(sessionId)
         history.clearSession(sessionId)
+        controlCoordinator.clearSession(sessionId)
     }
 
     private fun runLoop(sessionId: String, control: LoopControl) {
@@ -235,19 +382,19 @@ class SessionAutomationEngine(
                 actionType = "NONE",
                 code = "STEP_BEGIN"
             )
+            TaskRunReportHooks.onStepBegin(
+                sessionId = snapshot.sessionId,
+                step = step,
+                displayId = snapshot.currentVisibleDisplayId ?: snapshot.executionDisplayId,
+                topActivity = snapshot.lastKnownTopActivity,
+                topPackage = snapshot.lastKnownTopPackage
+            )
 
             if (shouldAbortStep(control, snapshot, step, actionType = "NONE")) {
                 return
             }
 
-            val observation = observationProvider.capture(
-                ObservationRequest(
-                    sessionId = snapshot.sessionId,
-                    executionDisplayId = snapshot.executionDisplayId,
-                    sessionTaskId = snapshot.sessionTaskId,
-                    imageReader = snapshot.runtimeHandle?.imageReader
-                )
-            )
+            val observation = captureObservationForPlanning(snapshot, step, control)
 
             if (shouldAbortStep(control, snapshot, step, actionType = "NONE")) {
                 return
@@ -286,11 +433,26 @@ class SessionAutomationEngine(
                     )
                 }
             }
+            TaskRunReportHooks.onObservation(
+                sessionId = snapshot.sessionId,
+                step = step,
+                observation = observation,
+                observationDisplayId = snapshot.executionDisplayId,
+                displayId = snapshot.currentVisibleDisplayId ?: snapshot.executionDisplayId,
+                topActivity = snapshot.lastKnownTopActivity,
+                topPackage = snapshot.lastKnownTopPackage
+            )
 
             if (shouldAbortStep(control, snapshot, step, actionType = "NONE")) {
                 return
             }
 
+            val capabilityProfile = CapabilityProfile.phase3PlatformReady(capabilities.supported)
+            val controlSnapshot = controlCoordinator.buildPlanningSnapshot(
+                sessionId = snapshot.sessionId,
+                command = snapshot.command,
+                capabilityProfile = capabilityProfile
+            )
             val planResult = planningAdapter.planNext(
                 request = PlanningRequest(
                     sessionId = snapshot.sessionId,
@@ -299,11 +461,12 @@ class SessionAutomationEngine(
                     executionDisplayId = snapshot.executionDisplayId,
                     sessionTaskId = snapshot.sessionTaskId,
                     planningMode = planningAdapter.modeForSession(snapshot.sessionId),
-                    capabilityProfile = CapabilityProfile.phase3PlatformReady(capabilities.supported),
+                    capabilityProfile = capabilityProfile,
                     observation = observation,
                     recentActions = history.recentActions(snapshot.sessionId),
                     lastFailureCode = history.lastFailureCode(snapshot.sessionId),
-                    lastUserReply = history.lastUserReply(snapshot.sessionId)
+                    lastUserReply = history.lastUserReply(snapshot.sessionId),
+                    controlSnapshot = controlSnapshot
                 )
             )
 
@@ -350,12 +513,20 @@ class SessionAutomationEngine(
                         code = planResult.code,
                         details = planResult.message
                     )
+                    TaskRunReportHooks.onPlanFailure(
+                        sessionId = snapshot.sessionId,
+                        step = step,
+                        code = planResult.code,
+                        details = planResult.message,
+                        rawResponseText = planResult.rawResponseSnippet
+                    )
                     return
                 }
 
                 is PlanResult.PlannedAction -> {
-                    val action = planResult.action
-                    val actionType = action.actionType()
+                    val proposedAction = planResult.action
+                    val proposedCanonicalAction = planResult.canonicalAction
+                    TaskRunReportHooks.onActionPlanned(snapshot.sessionId, step, proposedAction)
                     log(
                         event = "planner_result",
                         sessionId = snapshot.sessionId,
@@ -364,8 +535,26 @@ class SessionAutomationEngine(
                         surfaceDisplayId = snapshot.surfaceDisplayId,
                         sessionTaskId = snapshot.sessionTaskId,
                         step = step,
-                        actionType = actionType,
+                        actionType = proposedAction.actionType(),
                         code = "PLANNER_ACTION"
+                    )
+                    val controlResolution = controlCoordinator.resolveAction(
+                        sessionId = snapshot.sessionId,
+                        step = step,
+                        command = snapshot.command,
+                        beforeObservation = observation,
+                        action = proposedCanonicalAction
+                    )
+                    val action = controlResolution.finalAction
+                    val actionType = action.actionType()
+                    TaskRunReportHooks.onControlActionResolved(
+                        sessionId = snapshot.sessionId,
+                        step = step,
+                        proposedAction = controlResolution.proposedAction,
+                        finalAction = controlResolution.finalCanonicalAction,
+                        phaseBefore = controlResolution.phaseBefore.name,
+                        guardrailRule = controlResolution.guardrailDecision.rule,
+                        guardrailDecision = controlResolution.guardrailDecision.type.name
                     )
                     log(
                         event = "action_parsed",
@@ -376,76 +565,51 @@ class SessionAutomationEngine(
                         sessionTaskId = snapshot.sessionTaskId,
                         step = step,
                         actionType = actionType,
-                        code = "ACTION_READY"
+                        code = if (controlResolution.guardrailDecision.wasBlocked()) {
+                            controlResolution.guardrailDecision.rule ?: "ACTION_GUARDRAIL_REPLACED"
+                        } else {
+                            "ACTION_READY"
+                        },
+                        extras = if (controlResolution.guardrailDecision.wasBlocked()) {
+                            "proposedAction=${proposedAction.actionType()} finalAction=$actionType " +
+                                "rule=${controlResolution.guardrailDecision.rule} " +
+                                "message=${controlResolution.guardrailDecision.message}"
+                        } else {
+                            "{}"
+                        }
                     )
+
+                    var syntheticCode: String? = null
+                    var syntheticDetails: String? = null
+                    var executionResult: ActionExecutionResult? = null
+                    var afterObservation: ObservationResult? = null
 
                     when (action) {
                         is GuiAction.Done -> {
-                            history.recordAction(
-                                sessionId = sessionId,
-                                step = step,
-                                actionType = actionType,
-                                code = "DONE",
-                                summary = action.reason
-                            )
-                            history.setPendingQuestion(sessionId, null)
-                            log(
-                                event = "session_completed",
-                                sessionId = snapshot.sessionId,
-                                executionDisplayId = snapshot.executionDisplayId,
-                                virtualDisplayId = snapshot.virtualDisplayId,
-                                surfaceDisplayId = snapshot.surfaceDisplayId,
-                                sessionTaskId = snapshot.sessionTaskId,
-                                step = step,
-                                actionType = actionType,
-                                code = "DONE",
-                                extras = "reason=${action.reason}"
-                            )
-                            callbacks.onSessionCompleted(
+                            syntheticCode = "DONE"
+                            syntheticDetails = action.reason
+                            TaskRunReportHooks.onSyntheticActionResult(
                                 sessionId = snapshot.sessionId,
                                 step = step,
-                                reason = action.reason
+                                action = action,
+                                code = syntheticCode,
+                                details = syntheticDetails
                             )
-                            return
                         }
 
                         is GuiAction.AskUser -> {
-                            history.setPendingQuestion(sessionId, action.question)
-                            history.recordAction(
-                                sessionId = sessionId,
-                                step = step,
-                                actionType = actionType,
-                                code = "ASK_USER",
-                                summary = action.question
-                            )
-                            log(
-                                event = "session_waiting_user",
-                                sessionId = snapshot.sessionId,
-                                executionDisplayId = snapshot.executionDisplayId,
-                                virtualDisplayId = snapshot.virtualDisplayId,
-                                surfaceDisplayId = snapshot.surfaceDisplayId,
-                                sessionTaskId = snapshot.sessionTaskId,
-                                step = step,
-                                actionType = actionType,
-                                code = "ASK_USER",
-                                extras = "question=${action.question}"
-                            )
-                            callbacks.onSessionWaitingUser(
+                            syntheticCode = "ASK_USER"
+                            syntheticDetails = action.question
+                            TaskRunReportHooks.onSyntheticActionResult(
                                 sessionId = snapshot.sessionId,
                                 step = step,
-                                question = action.question
+                                action = action,
+                                code = syntheticCode,
+                                details = syntheticDetails
                             )
-                            return
                         }
 
                         is GuiAction.Wait -> {
-                            history.recordAction(
-                                sessionId = sessionId,
-                                step = step,
-                                actionType = actionType,
-                                code = "WAIT",
-                                summary = "durationMs=${action.durationMs}"
-                            )
                             val slept = sleepInterruptibly(action.durationMs, control.stopRequested)
                             if (!slept) {
                                 log(
@@ -461,6 +625,8 @@ class SessionAutomationEngine(
                                 )
                                 return
                             }
+                            syntheticCode = "WAIT_ELAPSED"
+                            syntheticDetails = "durationMs=${action.durationMs}"
                             log(
                                 event = "action_executed",
                                 sessionId = snapshot.sessionId,
@@ -470,8 +636,15 @@ class SessionAutomationEngine(
                                 sessionTaskId = snapshot.sessionTaskId,
                                 step = step,
                                 actionType = actionType,
-                                code = "WAIT_ELAPSED",
-                                extras = "durationMs=${action.durationMs}"
+                                code = syntheticCode,
+                                extras = syntheticDetails
+                            )
+                            TaskRunReportHooks.onSyntheticActionResult(
+                                sessionId = snapshot.sessionId,
+                                step = step,
+                                action = action,
+                                code = syntheticCode,
+                                details = syntheticDetails
                             )
                         }
 
@@ -482,6 +655,7 @@ class SessionAutomationEngine(
                                 action = action,
                                 control = control
                             )
+                            executionResult = execution
                             if (!execution.ok) {
                                 if (execution.code == "AUTOMATION_STOPPED") {
                                     log(
@@ -497,15 +671,49 @@ class SessionAutomationEngine(
                                     )
                                     return
                                 }
-                                history.setLastFailureCode(sessionId, execution.code)
-                                callbacks.onSessionFailed(
+                                TaskRunReportHooks.onPlatformResult(
                                     sessionId = snapshot.sessionId,
                                     step = step,
-                                    code = execution.code,
-                                    details = execution.details
+                                    action = action,
+                                    result = execution,
+                                    injectDisplayId = snapshot.executionDisplayId
+                                )
+                            } else {
+                                afterObservation = when (action) {
+                                    is GuiAction.Click -> captureClickAfterObservationWithSettle(
+                                        snapshot = snapshot,
+                                        step = step,
+                                        beforeObservation = observation,
+                                        control = control
+                                    )
+
+                                    else -> capturePostActionObservationWithSettle(
+                                        snapshot = snapshot,
+                                        step = step,
+                                        actionType = actionType,
+                                        control = control
+                                    )
+                                }
+                                if (action is GuiAction.Click &&
+                                    afterObservation != null &&
+                                    TaskRunReportHooks.shouldCollectClickDiagnostics(snapshot.sessionId)
+                                ) {
+                                    TaskRunReportHooks.onClickAfterObservation(
+                                        sessionId = snapshot.sessionId,
+                                        step = step,
+                                        observationDisplayId = snapshot.executionDisplayId,
+                                        observation = afterObservation
+                                    )
+                                }
+                                TaskRunReportHooks.onPlatformResult(
+                                    sessionId = snapshot.sessionId,
+                                    step = step,
+                                    action = action,
+                                    result = execution,
+                                    injectDisplayId = snapshot.executionDisplayId
                                 )
                                 log(
-                                    event = "session_failed",
+                                    event = "action_executed",
                                     sessionId = snapshot.sessionId,
                                     executionDisplayId = snapshot.executionDisplayId,
                                     virtualDisplayId = snapshot.virtualDisplayId,
@@ -514,32 +722,108 @@ class SessionAutomationEngine(
                                     step = step,
                                     actionType = actionType,
                                     code = execution.code,
-                                    extras = "details=${execution.details}"
+                                    extras = "injectDisplayId=${snapshot.executionDisplayId} details=${execution.details}"
                                 )
-                                return
                             }
-                            history.recordAction(
-                                sessionId = sessionId,
-                                step = step,
-                                actionType = actionType,
-                                code = execution.code,
-                                summary = execution.details
-                            )
-                            history.setLastFailureCode(sessionId, null)
-                            log(
-                                event = "action_executed",
-                                sessionId = snapshot.sessionId,
-                                executionDisplayId = snapshot.executionDisplayId,
-                                virtualDisplayId = snapshot.virtualDisplayId,
-                                surfaceDisplayId = snapshot.surfaceDisplayId,
-                                sessionTaskId = snapshot.sessionTaskId,
-                                step = step,
-                                actionType = actionType,
-                                code = execution.code,
-                                extras = "injectDisplayId=${snapshot.executionDisplayId} " +
-                                    "details=${execution.details}"
-                            )
                         }
+                    }
+
+                    val postResolution = controlCoordinator.finalizeStep(
+                        sessionId = snapshot.sessionId,
+                        step = step,
+                        command = snapshot.command,
+                        beforeObservation = observation,
+                        afterObservation = afterObservation,
+                        resolution = controlResolution,
+                        executionResult = executionResult,
+                        syntheticCode = syntheticCode,
+                        syntheticDetails = syntheticDetails
+                    )
+                    TaskRunReportHooks.onControlStepEvaluated(
+                        sessionId = snapshot.sessionId,
+                        step = step,
+                        phaseAfter = postResolution.phaseAfter.name,
+                        completionVerdict = postResolution.completionVerdict.name,
+                        observationChanged = postResolution.observationChanged,
+                        lowYield = postResolution.resultSummary.lowYield
+                    )
+                    history.recordAction(
+                        sessionId = sessionId,
+                        step = step,
+                        actionType = actionType,
+                        code = postResolution.resultSummary.code,
+                        summary = postResolution.resultSummary.message
+                    )
+                    if (postResolution.resultSummary.category == StepResultCategory.PLATFORM_FAILED) {
+                        history.setLastFailureCode(sessionId, postResolution.resultSummary.code)
+                        callbacks.onSessionFailed(
+                            sessionId = snapshot.sessionId,
+                            step = step,
+                            code = postResolution.resultSummary.code,
+                            details = postResolution.resultSummary.message
+                        )
+                        log(
+                            event = "session_failed",
+                            sessionId = snapshot.sessionId,
+                            executionDisplayId = snapshot.executionDisplayId,
+                            virtualDisplayId = snapshot.virtualDisplayId,
+                            surfaceDisplayId = snapshot.surfaceDisplayId,
+                            sessionTaskId = snapshot.sessionTaskId,
+                            step = step,
+                            actionType = actionType,
+                            code = postResolution.resultSummary.code,
+                            extras = "details=${postResolution.resultSummary.message}"
+                        )
+                        return
+                    }
+                    history.setLastFailureCode(sessionId, null)
+
+                    if (postResolution.shouldComplete) {
+                        history.setPendingQuestion(sessionId, null)
+                        log(
+                            event = "session_completed",
+                            sessionId = snapshot.sessionId,
+                            executionDisplayId = snapshot.executionDisplayId,
+                            virtualDisplayId = snapshot.virtualDisplayId,
+                            surfaceDisplayId = snapshot.surfaceDisplayId,
+                            sessionTaskId = snapshot.sessionTaskId,
+                            step = step,
+                            actionType = actionType,
+                            code = "COMPLETED",
+                            extras = "reason=${postResolution.completionReason ?: postResolution.resultSummary.message}"
+                        )
+                        callbacks.onSessionCompleted(
+                            sessionId = snapshot.sessionId,
+                            step = step,
+                            reason = postResolution.completionReason ?: postResolution.resultSummary.message
+                        )
+                        return
+                    }
+
+                    if (action is GuiAction.AskUser || postResolution.shouldAskUser) {
+                        val question = when {
+                            action is GuiAction.AskUser -> action.question
+                            else -> postResolution.askUserQuestion ?: "当前需要你接手确认下一步。"
+                        }
+                        history.setPendingQuestion(sessionId, question)
+                        log(
+                            event = "session_waiting_user",
+                            sessionId = snapshot.sessionId,
+                            executionDisplayId = snapshot.executionDisplayId,
+                            virtualDisplayId = snapshot.virtualDisplayId,
+                            surfaceDisplayId = snapshot.surfaceDisplayId,
+                            sessionTaskId = snapshot.sessionTaskId,
+                            step = step,
+                            actionType = "ASK_USER",
+                            code = "WAITING_USER",
+                            extras = "question=$question"
+                        )
+                        callbacks.onSessionWaitingUser(
+                            sessionId = snapshot.sessionId,
+                            step = step,
+                            question = question
+                        )
+                        return
                     }
                 }
             }
@@ -666,6 +950,240 @@ class SessionAutomationEngine(
         }
 
         return lastResult
+    }
+
+    private fun captureClickAfterObservationWithSettle(
+        snapshot: AutomationSessionSnapshot,
+        step: Int,
+        beforeObservation: ObservationResult,
+        control: LoopControl
+    ): ObservationResult? {
+        if (postClickSettleDelayMs > 0L &&
+            !sleepInterruptibly(postClickSettleDelayMs, control.stopRequested)
+        ) {
+            log(
+                event = "click_settle",
+                sessionId = snapshot.sessionId,
+                executionDisplayId = snapshot.executionDisplayId,
+                virtualDisplayId = snapshot.virtualDisplayId,
+                surfaceDisplayId = snapshot.surfaceDisplayId,
+                sessionTaskId = snapshot.sessionTaskId,
+                step = step,
+                actionType = "CLICK",
+                code = "POST_CLICK_SETTLE_SKIPPED",
+                extras = "reason=stop_requested"
+            )
+            return null
+        }
+
+        val firstAfter = captureClickAfterObservation(snapshot, step)
+        val beforeCaptured = beforeObservation as? ObservationResult.Captured
+        val afterCaptured = firstAfter as? ObservationResult.Captured
+        if (beforeCaptured == null || afterCaptured == null ||
+            !ObservationBitmapUtils.areNearlyUnchanged(beforeCaptured, afterCaptured)
+        ) {
+            return firstAfter
+        }
+
+        log(
+            event = "click_settle",
+            sessionId = snapshot.sessionId,
+            executionDisplayId = snapshot.executionDisplayId,
+            virtualDisplayId = snapshot.virtualDisplayId,
+            surfaceDisplayId = snapshot.surfaceDisplayId,
+            sessionTaskId = snapshot.sessionTaskId,
+            step = step,
+            actionType = "CLICK",
+            code = "POST_CLICK_UNCHANGED_RETRY_SCHEDULED",
+            extras = "delayMs=$postClickSettleRetryDelayMs"
+        )
+        if (postClickSettleRetryDelayMs > 0L &&
+            !sleepInterruptibly(postClickSettleRetryDelayMs, control.stopRequested)
+        ) {
+            log(
+                event = "click_settle",
+                sessionId = snapshot.sessionId,
+                executionDisplayId = snapshot.executionDisplayId,
+                virtualDisplayId = snapshot.virtualDisplayId,
+                surfaceDisplayId = snapshot.surfaceDisplayId,
+                sessionTaskId = snapshot.sessionTaskId,
+                step = step,
+                actionType = "CLICK",
+                code = "POST_CLICK_UNCHANGED_RETRY_SKIPPED",
+                extras = "reason=stop_requested"
+            )
+            return firstAfter
+        }
+        return captureClickAfterObservation(snapshot, step)
+    }
+
+    private fun capturePostActionObservationWithSettle(
+        snapshot: AutomationSessionSnapshot,
+        step: Int,
+        actionType: String,
+        control: LoopControl
+    ): ObservationResult? {
+        if (postClickSettleDelayMs > 0L &&
+            !sleepInterruptibly(postClickSettleDelayMs, control.stopRequested)
+        ) {
+            log(
+                event = "post_action_observation",
+                sessionId = snapshot.sessionId,
+                executionDisplayId = snapshot.executionDisplayId,
+                virtualDisplayId = snapshot.virtualDisplayId,
+                surfaceDisplayId = snapshot.surfaceDisplayId,
+                sessionTaskId = snapshot.sessionTaskId,
+                step = step,
+                actionType = actionType,
+                code = "POST_ACTION_OBSERVATION_SKIPPED",
+                extras = "reason=stop_requested"
+            )
+            return null
+        }
+        val observation = captureClickAfterObservation(snapshot, step)
+        log(
+            event = "post_action_observation",
+            sessionId = snapshot.sessionId,
+            executionDisplayId = snapshot.executionDisplayId,
+            virtualDisplayId = snapshot.virtualDisplayId,
+            surfaceDisplayId = snapshot.surfaceDisplayId,
+            sessionTaskId = snapshot.sessionTaskId,
+            step = step,
+            actionType = actionType,
+            code = when (observation) {
+                is ObservationResult.Captured -> "OBSERVATION_OK"
+                is ObservationResult.Failed -> observation.code
+            }
+        )
+        return observation
+    }
+
+    private fun captureClickAfterObservation(
+        snapshot: AutomationSessionSnapshot,
+        step: Int
+    ): ObservationResult {
+        val observation = observationProvider.capture(
+            ObservationRequest(
+                sessionId = snapshot.sessionId,
+                executionDisplayId = snapshot.executionDisplayId,
+                sessionTaskId = snapshot.sessionTaskId,
+                imageReader = snapshot.runtimeHandle?.imageReader
+            )
+        )
+        when (observation) {
+            is ObservationResult.Captured -> {
+                log(
+                    event = "click_after_observation",
+                    sessionId = snapshot.sessionId,
+                    executionDisplayId = snapshot.executionDisplayId,
+                    virtualDisplayId = snapshot.virtualDisplayId,
+                    surfaceDisplayId = snapshot.surfaceDisplayId,
+                    sessionTaskId = snapshot.sessionTaskId,
+                    step = step,
+                    actionType = "CLICK",
+                    code = "OBSERVATION_OK",
+                    extras = "observationDisplayId=${snapshot.executionDisplayId} " +
+                        "width=${observation.width} height=${observation.height}"
+                )
+            }
+
+            is ObservationResult.Failed -> {
+                log(
+                    event = "click_after_observation",
+                    sessionId = snapshot.sessionId,
+                    executionDisplayId = snapshot.executionDisplayId,
+                    virtualDisplayId = snapshot.virtualDisplayId,
+                    surfaceDisplayId = snapshot.surfaceDisplayId,
+                    sessionTaskId = snapshot.sessionTaskId,
+                    step = step,
+                    actionType = "CLICK",
+                    code = observation.code,
+                    extras = "observationDisplayId=${snapshot.executionDisplayId} " +
+                        "message=${observation.message}"
+                )
+            }
+        }
+        return observation
+    }
+
+    private fun captureObservationForPlanning(
+        snapshot: AutomationSessionSnapshot,
+        step: Int,
+        control: LoopControl
+    ): ObservationResult {
+        val request = ObservationRequest(
+            sessionId = snapshot.sessionId,
+            executionDisplayId = snapshot.executionDisplayId,
+            sessionTaskId = snapshot.sessionTaskId,
+            imageReader = snapshot.runtimeHandle?.imageReader
+        )
+        val firstObservation = observationProvider.capture(request)
+        if (!initialObservationRetryPolicy.shouldRetry(snapshot, step, firstObservation)) {
+            return firstObservation
+        }
+        log(
+            event = "observation_retry",
+            sessionId = snapshot.sessionId,
+            executionDisplayId = snapshot.executionDisplayId,
+            virtualDisplayId = snapshot.virtualDisplayId,
+            surfaceDisplayId = snapshot.surfaceDisplayId,
+            sessionTaskId = snapshot.sessionTaskId,
+            step = step,
+            actionType = "NONE",
+            code = "INITIAL_FRAME_RETRY_SCHEDULED",
+            extras = "delayMs=$initialObservationRetryDelayMs reason=likely_black_frame"
+        )
+        if (initialObservationRetryDelayMs > 0L &&
+            !sleepInterruptibly(initialObservationRetryDelayMs, control.stopRequested)
+        ) {
+            log(
+                event = "observation_retry",
+                sessionId = snapshot.sessionId,
+                executionDisplayId = snapshot.executionDisplayId,
+                virtualDisplayId = snapshot.virtualDisplayId,
+                surfaceDisplayId = snapshot.surfaceDisplayId,
+                sessionTaskId = snapshot.sessionTaskId,
+                step = step,
+                actionType = "NONE",
+                code = "INITIAL_FRAME_RETRY_SKIPPED",
+                extras = "reason=stop_requested"
+            )
+            return firstObservation
+        }
+        val retriedObservation = observationProvider.capture(request)
+        return when (retriedObservation) {
+            is ObservationResult.Captured -> {
+                log(
+                    event = "observation_retry",
+                    sessionId = snapshot.sessionId,
+                    executionDisplayId = snapshot.executionDisplayId,
+                    virtualDisplayId = snapshot.virtualDisplayId,
+                    surfaceDisplayId = snapshot.surfaceDisplayId,
+                    sessionTaskId = snapshot.sessionTaskId,
+                    step = step,
+                    actionType = "NONE",
+                    code = "INITIAL_FRAME_RETRY_CAPTURED",
+                    extras = "width=${retriedObservation.width} height=${retriedObservation.height}"
+                )
+                retriedObservation
+            }
+
+            is ObservationResult.Failed -> {
+                log(
+                    event = "observation_retry",
+                    sessionId = snapshot.sessionId,
+                    executionDisplayId = snapshot.executionDisplayId,
+                    virtualDisplayId = snapshot.virtualDisplayId,
+                    surfaceDisplayId = snapshot.surfaceDisplayId,
+                    sessionTaskId = snapshot.sessionTaskId,
+                    step = step,
+                    actionType = "NONE",
+                    code = "INITIAL_FRAME_RETRY_FALLBACK",
+                    extras = "retryCode=${retriedObservation.code} details=${retriedObservation.message}"
+                )
+                firstObservation
+            }
+        }
     }
 
     private fun sleepInterruptibly(durationMs: Long, stopRequested: AtomicBoolean): Boolean {

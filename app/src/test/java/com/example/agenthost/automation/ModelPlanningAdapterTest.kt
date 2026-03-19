@@ -5,6 +5,7 @@ import com.example.agenthost.model.ModelRequest
 import com.example.agenthost.model.ModelResponse
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -208,6 +209,27 @@ class ModelPlanningAdapterTest {
         assertTrue(request.userPrompt.startsWith("DEBUG_ONLY_ANDROID_USER_PROMPT"))
         assertFalse(request.systemPrompt.contains("Return exactly one JSON object"))
         assertFalse(request.userPrompt.contains("Return exactly one JSON object"))
+    }
+
+    @Test
+    fun plannedActionPreservesProxySanitizerMetaInCanonicalAction() {
+        val adapter = adapterForSuccess(
+            """
+            {"action":"CLICK","x":540,"y":960,"_meta":{"coordSpace":"IMAGE_PIXEL","sanitizerPath":"direct_valid","sourceModel":"qwen3-vl-plus","sourceMode":"openai_compatible","rawModelAction":"{\"action\":\"CLICK\",\"x\":500,\"y\":500}"}} 
+            """.trimIndent()
+        )
+
+        val result = adapter.planNext(buildRequest())
+
+        assertTrue(result is PlanResult.PlannedAction)
+        val planned = result as PlanResult.PlannedAction
+        assertEquals("CLICK", planned.action.actionType())
+        assertEquals("direct_valid", planned.canonicalAction.sanitizerPath)
+        assertEquals("IMAGE_PIXEL", planned.canonicalAction.coordSpace.name)
+        assertEquals("qwen3-vl-plus", planned.canonicalAction.sourceModel)
+        assertEquals("openai_compatible", planned.canonicalAction.sourceMode)
+        assertEquals("{\"action\":\"CLICK\",\"x\":500,\"y\":500}", planned.canonicalAction.rawModelAction)
+        assertNotNull(planned.rawResponseText)
     }
 
     private fun adapterForSuccess(outputText: String): ModelPlanningAdapter {

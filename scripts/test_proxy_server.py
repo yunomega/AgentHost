@@ -104,6 +104,7 @@ class ProxyServerPlanTest(unittest.TestCase):
         self.assertEqual(540, output["x"])
         self.assertEqual(960, output["y"])
         self.assertEqual("IMAGE_PIXEL", output["_meta"]["coordSpace"])
+        self.assertEqual("direct_valid", output["_meta"]["sanitizerPath"])
         self.assertEqual("openai_compatible", output["_meta"]["sourceMode"])
         self.assertEqual("qwen3-vl-plus", output["_meta"]["sourceModel"])
         self.assertEqual('{"action":"CLICK","x":500,"y":500}', output["_meta"]["rawModelAction"])
@@ -197,10 +198,13 @@ class ProxyServerPlanTest(unittest.TestCase):
             source_mode="openai_compatible",
         )
 
-        parsed = json.loads(sanitized)
+        self.assertIsNotNone(sanitized)
+        parsed = json.loads(sanitized.output_text)
         self.assertEqual("ASK_USER", parsed["action"])
         self.assertEqual("请提供要输入的搜索内容。", parsed["question"])
         self.assertEqual("NONE", parsed["_meta"]["coordSpace"])
+        self.assertEqual("direct_valid", sanitized.sanitizer_path)
+        self.assertEqual("direct_valid", parsed["_meta"]["sanitizerPath"])
         self.assertEqual(
             '{"action":"ASK_USER","question":"请提供要输入的搜索内容。"}',
             parsed["_meta"]["rawModelAction"],
@@ -214,9 +218,12 @@ class ProxyServerPlanTest(unittest.TestCase):
             source_mode="openai_compatible",
         )
 
-        parsed = json.loads(sanitized)
+        self.assertIsNotNone(sanitized)
+        parsed = json.loads(sanitized.output_text)
         self.assertEqual({"action": "CLICK", "x": 13, "y": 65}, {k: parsed[k] for k in ("action", "x", "y")})
         self.assertEqual("IMAGE_PIXEL", parsed["_meta"]["coordSpace"])
+        self.assertEqual("legacy_parse", sanitized.sanitizer_path)
+        self.assertEqual("legacy_parse", parsed["_meta"]["sanitizerPath"])
         self.assertEqual("mock-model", parsed["_meta"]["sourceModel"])
         self.assertEqual("openai_compatible", parsed["_meta"]["sourceMode"])
         self.assertEqual("action: CLICK point: 12, 34", parsed["_meta"]["rawModelAction"])
