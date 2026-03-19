@@ -241,7 +241,7 @@ class OverlayEntryService : Service() {
     }
 
     private fun renderOverlayIfChanged(session: com.example.agenthost.session.SessionState?) {
-        val snapshot = SessionStateListenerSnapshot.from(session)
+        val snapshot = SessionStateListenerSnapshot.forRenderDiff(session)
         if (snapshot == lastRenderedSessionSnapshot) {
             return
         }

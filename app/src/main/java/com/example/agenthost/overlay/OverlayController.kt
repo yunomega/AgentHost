@@ -371,7 +371,7 @@ class OverlayController(
             }
 
             OverlayMode.RECOVERY -> {
-                when (OverlayRecoverySupport.primaryRoute(session)) {
+                when (OverlayRecoverySupport.derivePrimaryRoute(session)) {
                     RecoveryPrimaryRoute.NONE -> {
                         isExpanded = false
                     }

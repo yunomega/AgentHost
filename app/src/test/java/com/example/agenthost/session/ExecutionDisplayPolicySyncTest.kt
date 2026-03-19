@@ -37,21 +37,21 @@ class ExecutionDisplayPolicySyncTest {
         val sync = ExecutionDisplayPolicySync(gateway)
         val state = virtualState()
 
-        sync.markUserHandoff(state, "waiting_user")
+        sync.syncState(state, ExecutionDisplayBridgeState.USER_HANDOFF, "waiting_user")
         assertEquals(
-            "update:${state.sessionId}:${state.executionDisplayId}:${ExecutionDisplayPolicySync.STATE_USER_HANDOFF}:waiting_user",
+            "update:${state.sessionId}:${state.executionDisplayId}:USER_HANDOFF:waiting_user",
             gateway.lastCall
         )
 
-        sync.markExecution(state, "reply_session")
+        sync.syncState(state, ExecutionDisplayBridgeState.EXECUTION, "reply_session")
         assertEquals(
-            "update:${state.sessionId}:${state.executionDisplayId}:${ExecutionDisplayPolicySync.STATE_EXECUTION}:reply_session",
+            "update:${state.sessionId}:${state.executionDisplayId}:EXECUTION:reply_session",
             gateway.lastCall
         )
 
-        sync.markCompleted(state, "session_completed")
+        sync.syncState(state, ExecutionDisplayBridgeState.COMPLETED, "session_completed")
         assertEquals(
-            "update:${state.sessionId}:${state.executionDisplayId}:${ExecutionDisplayPolicySync.STATE_COMPLETED}:session_completed",
+            "update:${state.sessionId}:${state.executionDisplayId}:COMPLETED:session_completed",
             gateway.lastCall
         )
     }
@@ -72,7 +72,6 @@ class ExecutionDisplayPolicySyncTest {
             sessionId = "session-1",
             command = "demo",
             executionDisplayId = 42,
-            currentExecutionDisplayId = 42,
             currentVisibleDisplayId = 42,
             virtualDisplayId = 42,
             surfaceDisplayId = null,
@@ -89,7 +88,6 @@ class ExecutionDisplayPolicySyncTest {
             backgroundPreferred = true,
             returnToVirtualAfterUser = true,
             completionReturnPolicy = CompletionReturnPolicy.CURRENT_BEHAVIOR,
-            pendingReturnToVirtualDisplay = false,
             migratedToMain = false,
             lastMigrationCode = null,
             lastMigrationDirection = null,
@@ -101,7 +99,6 @@ class ExecutionDisplayPolicySyncTest {
     private fun mainState(): SessionState {
         return virtualState().copy(
             executionDisplayId = Display.DEFAULT_DISPLAY,
-            currentExecutionDisplayId = Display.DEFAULT_DISPLAY,
             currentVisibleDisplayId = Display.DEFAULT_DISPLAY,
             virtualDisplayId = null,
             surfaceDisplayId = Display.DEFAULT_DISPLAY,

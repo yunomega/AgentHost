@@ -5,6 +5,12 @@ import com.example.agenthost.migration.TaskMigrationPolicy
 import com.example.agenthost.session.SessionDisplayMode
 import com.example.agenthost.session.SessionState
 
+/**
+ * Controller-local recovery action route.
+ *
+ * This is a derived dispatch hint only and must not be treated as business
+ * state. `SURFACE_ON_MAIN` is retained as a reserved compatibility value.
+ */
 internal enum class RecoveryPrimaryRoute {
     NONE,
     SURFACE_ON_MAIN,
@@ -29,7 +35,7 @@ internal object OverlayRecoverySupport {
         )
     }
 
-    fun primaryRoute(session: SessionState): RecoveryPrimaryRoute {
+    fun derivePrimaryRoute(session: SessionState): RecoveryPrimaryRoute {
         if (session.displayMode != SessionDisplayMode.VIRTUAL_DISPLAY) {
             return RecoveryPrimaryRoute.NONE
         }

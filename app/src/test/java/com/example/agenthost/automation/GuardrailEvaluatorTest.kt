@@ -60,8 +60,8 @@ class GuardrailEvaluatorTest {
                 afterObservation = after,
                 resolution = resolution,
                 executionResult = ActionExecutionResult(ok = true, code = "OK", details = "no change"),
-                syntheticCode = null,
-                syntheticDetails = null
+                controlSyntheticCode = null,
+                controlSyntheticDetails = null
             )
         }
 
@@ -101,14 +101,14 @@ class GuardrailEvaluatorTest {
             afterObservation = null,
             resolution = resolution,
             executionResult = null,
-            syntheticCode = "DONE",
-            syntheticDetails = "search bar looks ready"
+            controlSyntheticCode = "DONE",
+            controlSyntheticDetails = "search bar looks ready"
         )
 
         assertEquals(CompletionVerdict.UNSURE, post.completionVerdict)
-        assertFalse(post.shouldComplete)
-        assertTrue(post.shouldAskUser)
-        assertEquals("模型判断任务可能已完成，但当前界面仍需你确认。", post.askUserQuestion)
+        assertFalse(post.requestSessionComplete)
+        assertTrue(post.requestUserHandoff)
+        assertEquals("模型判断任务可能已完成，但当前界面仍需你确认。", post.handoffQuestion)
     }
 
     @Test
@@ -134,12 +134,12 @@ class GuardrailEvaluatorTest {
             afterObservation = null,
             resolution = resolution,
             executionResult = null,
-            syntheticCode = "DONE",
-            syntheticDetails = "task complete"
+            controlSyntheticCode = "DONE",
+            controlSyntheticDetails = "task complete"
         )
 
-        assertTrue(post.shouldComplete)
-        assertFalse(post.shouldAskUser)
+        assertTrue(post.requestSessionComplete)
+        assertFalse(post.requestUserHandoff)
     }
 
     private fun captured(base64: String): ObservationResult.Captured {

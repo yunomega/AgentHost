@@ -55,7 +55,6 @@ data class SessionState(
     val sessionId: String,
     val command: String,
     val executionDisplayId: Int,
-    val currentExecutionDisplayId: Int,
     val currentVisibleDisplayId: Int?,
     val virtualDisplayId: Int?,
     val surfaceDisplayId: Int?,
@@ -72,7 +71,6 @@ data class SessionState(
     val backgroundPreferred: Boolean,
     val returnToVirtualAfterUser: Boolean,
     val completionReturnPolicy: CompletionReturnPolicy,
-    val pendingReturnToVirtualDisplay: Boolean,
     val migratedToMain: Boolean,
     val lastMigrationCode: String?,
     val lastMigrationDirection: String?,
@@ -88,11 +86,20 @@ data class SessionState(
     val postCompletionState: PostCompletionState = PostCompletionState.NONE,
     val postCompletionResultCode: String? = null
 ) {
+    // Compatibility mirror: there is no separate mutable current execution display.
+    val currentExecutionDisplayId: Int
+        get() = executionDisplayId
+
+    // Compatibility mirror: the previous flag no longer has an owning runtime state.
+    val pendingReturnToVirtualDisplay: Boolean
+        get() = false
+
     fun isOnMainDisplay(): Boolean = currentVisibleDisplayId == Display.DEFAULT_DISPLAY
 }
 
+// Live idle is represented by `activeSession == null`; there is no canonical
+// in-session IDLE state value.
 enum class SessionStatus {
-    IDLE,
     STARTING,
     READY,
     RUNNING,

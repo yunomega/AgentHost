@@ -10,16 +10,22 @@ data class ControlActionResolution(
     val guardrailDecision: GuardrailDecision
 )
 
+/**
+ * Control-layer post-step resolution.
+ *
+ * The request fields are instructions for the coordinator callback boundary,
+ * not canonical session states.
+ */
 data class ControlPostActionResolution(
     val phaseBefore: SubgoalPhase,
     val phaseAfter: SubgoalPhase,
     val completionVerdict: CompletionVerdict,
     val resultSummary: StepResultSummary,
     val observationChanged: Boolean?,
-    val shouldComplete: Boolean,
+    val requestSessionComplete: Boolean,
     val completionReason: String?,
-    val shouldAskUser: Boolean,
-    val askUserQuestion: String?
+    val requestUserHandoff: Boolean,
+    val handoffQuestion: String?
 )
 
 class AgentControlCoordinator(
@@ -102,8 +108,8 @@ class AgentControlCoordinator(
         afterObservation: ObservationResult?,
         resolution: ControlActionResolution,
         executionResult: ActionExecutionResult?,
-        syntheticCode: String?,
-        syntheticDetails: String?
+        controlSyntheticCode: String?,
+        controlSyntheticDetails: String?
     ): ControlPostActionResolution {
         val state = states.computeIfAbsent(sessionId) {
             GuardrailState(subgoalState = subgoalStateMachine.initialState(command))
@@ -136,8 +142,8 @@ class AgentControlCoordinator(
         val resultSummary = buildResultSummary(
             resolution = resolution,
             executionResult = executionResult,
-            syntheticCode = syntheticCode,
-            syntheticDetails = syntheticDetails,
+            controlSyntheticCode = controlSyntheticCode,
+            controlSyntheticDetails = controlSyntheticDetails,
             observationChanged = observationChanged,
             completionVerdict = completionVerdict,
             state = state
@@ -145,7 +151,7 @@ class AgentControlCoordinator(
         val requiresDoneConfirmation = resolution.finalCanonicalAction.type == CanonicalActionType.DONE &&
             beforeObservation is ObservationResult.Captured &&
             completionVerdict != CompletionVerdict.SATISFIED
-        val shouldAskUser = resultSummary.category == StepResultCategory.LOW_YIELD_HANDOFF
+        val requestUserHandoff = resultSummary.category == StepResultCategory.LOW_YIELD_HANDOFF
             || requiresDoneConfirmation
         val updated = updateState(
             previous = state,
@@ -164,7 +170,7 @@ class AgentControlCoordinator(
             completionVerdict = completionVerdict,
             resultSummary = resultSummary,
             observationChanged = observationChanged,
-            shouldComplete = completionVerdict == CompletionVerdict.SATISFIED ||
+            requestSessionComplete = completionVerdict == CompletionVerdict.SATISFIED ||
                 (resolution.finalCanonicalAction.type == CanonicalActionType.DONE && !requiresDoneConfirmation),
             completionReason = when {
                 completionVerdict == CompletionVerdict.SATISFIED -> "completion_evaluator_satisfied"
@@ -172,8 +178,8 @@ class AgentControlCoordinator(
                     resolution.finalCanonicalAction.reason ?: "model_done"
                 else -> null
             },
-            shouldAskUser = shouldAskUser,
-            askUserQuestion = if (shouldAskUser) {
+            requestUserHandoff = requestUserHandoff,
+            handoffQuestion = if (requestUserHandoff) {
                 if (requiresDoneConfirmation) {
                     "模型判断任务可能已完成，但当前界面仍需你确认。"
                 } else {
@@ -188,8 +194,8 @@ class AgentControlCoordinator(
     private fun buildResultSummary(
         resolution: ControlActionResolution,
         executionResult: ActionExecutionResult?,
-        syntheticCode: String?,
-        syntheticDetails: String?,
+        controlSyntheticCode: String?,
+        controlSyntheticDetails: String?,
         observationChanged: Boolean?,
         completionVerdict: CompletionVerdict,
         state: GuardrailState
@@ -201,8 +207,8 @@ class AgentControlCoordinator(
                     CanonicalActionType.DONE -> StepResultCategory.COMPLETION_SATISFIED
                     else -> StepResultCategory.GUARDRAIL_BLOCKED
                 },
-                code = syntheticCode ?: resolution.guardrailDecision.rule ?: "GUARDRAIL_BLOCKED",
-                message = syntheticDetails ?: resolution.guardrailDecision.message.orEmpty(),
+                code = controlSyntheticCode ?: resolution.guardrailDecision.rule ?: "GUARDRAIL_BLOCKED",
+                message = controlSyntheticDetails ?: resolution.guardrailDecision.message.orEmpty(),
                 observationChanged = observationChanged,
                 lowYield = resolution.guardrailDecision.rule == "REPEAT_CLICK_NEARBY_BLOCK",
                 guardrailRule = resolution.guardrailDecision.rule
@@ -211,8 +217,8 @@ class AgentControlCoordinator(
         if (completionVerdict == CompletionVerdict.SATISFIED) {
             return StepResultSummary(
                 category = StepResultCategory.COMPLETION_SATISFIED,
-                code = syntheticCode ?: executionResult?.code ?: "COMPLETION_SATISFIED",
-                message = syntheticDetails ?: executionResult?.details ?: "completion satisfied",
+                code = controlSyntheticCode ?: executionResult?.code ?: "COMPLETION_SATISFIED",
+                message = controlSyntheticDetails ?: executionResult?.details ?: "completion satisfied",
                 observationChanged = observationChanged
             )
         }
@@ -246,16 +252,16 @@ class AgentControlCoordinator(
         if (resolution.finalCanonicalAction.type == CanonicalActionType.WAIT) {
             return StepResultSummary(
                 category = StepResultCategory.WAIT_ELAPSED,
-                code = syntheticCode ?: "WAIT_ELAPSED",
-                message = syntheticDetails ?: "wait elapsed",
+                code = controlSyntheticCode ?: "WAIT_ELAPSED",
+                message = controlSyntheticDetails ?: "wait elapsed",
                 observationChanged = observationChanged
             )
         }
         if (resolution.finalCanonicalAction.type == CanonicalActionType.ASK_USER) {
             return StepResultSummary(
                 category = StepResultCategory.LOW_YIELD_HANDOFF,
-                code = syntheticCode ?: "ASK_USER",
-                message = syntheticDetails ?: (resolution.finalCanonicalAction.question ?: "ask user"),
+                code = controlSyntheticCode ?: "ASK_USER",
+                message = controlSyntheticDetails ?: (resolution.finalCanonicalAction.question ?: "ask user"),
                 observationChanged = observationChanged,
                 lowYield = true
             )
@@ -263,15 +269,15 @@ class AgentControlCoordinator(
         if (resolution.finalCanonicalAction.type == CanonicalActionType.DONE) {
             return StepResultSummary(
                 category = StepResultCategory.SYNTHETIC_DONE,
-                code = syntheticCode ?: "DONE",
-                message = syntheticDetails ?: (resolution.finalCanonicalAction.reason ?: "done"),
+                code = controlSyntheticCode ?: "DONE",
+                message = controlSyntheticDetails ?: (resolution.finalCanonicalAction.reason ?: "done"),
                 observationChanged = observationChanged
             )
         }
         return StepResultSummary(
             category = StepResultCategory.GUARDRAIL_BLOCKED,
-            code = syntheticCode ?: "NO_RESULT",
-            message = syntheticDetails ?: "no result",
+            code = controlSyntheticCode ?: "NO_RESULT",
+            message = controlSyntheticDetails ?: "no result",
             observationChanged = observationChanged
         )
     }

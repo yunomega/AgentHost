@@ -484,33 +484,33 @@ class SessionAutomationEngine(
                         }
                     )
 
-                    var syntheticCode: String? = null
-                    var syntheticDetails: String? = null
+                    var controlSyntheticCode: String? = null
+                    var controlSyntheticDetails: String? = null
                     var executionResult: ActionExecutionResult? = null
                     var afterObservation: ObservationResult? = null
 
                     when (action) {
                         is GuiAction.Done -> {
-                            syntheticCode = "DONE"
-                            syntheticDetails = action.reason
+                            controlSyntheticCode = "DONE"
+                            controlSyntheticDetails = action.reason
                             TaskRunReportHooks.onSyntheticActionResult(
                                 sessionId = snapshot.sessionId,
                                 step = step,
                                 action = action,
-                                code = syntheticCode,
-                                details = syntheticDetails
+                                code = controlSyntheticCode,
+                                details = controlSyntheticDetails
                             )
                         }
 
                         is GuiAction.AskUser -> {
-                            syntheticCode = "ASK_USER"
-                            syntheticDetails = action.question
+                            controlSyntheticCode = "ASK_USER"
+                            controlSyntheticDetails = action.question
                             TaskRunReportHooks.onSyntheticActionResult(
                                 sessionId = snapshot.sessionId,
                                 step = step,
                                 action = action,
-                                code = syntheticCode,
-                                details = syntheticDetails
+                                code = controlSyntheticCode,
+                                details = controlSyntheticDetails
                             )
                         }
 
@@ -530,8 +530,8 @@ class SessionAutomationEngine(
                                 )
                                 return
                             }
-                            syntheticCode = "WAIT_ELAPSED"
-                            syntheticDetails = "durationMs=${action.durationMs}"
+                            controlSyntheticCode = "WAIT_ELAPSED"
+                            controlSyntheticDetails = "durationMs=${action.durationMs}"
                             log(
                                 event = "action_executed",
                                 sessionId = snapshot.sessionId,
@@ -541,15 +541,15 @@ class SessionAutomationEngine(
                                 sessionTaskId = snapshot.sessionTaskId,
                                 step = step,
                                 actionType = actionType,
-                                code = syntheticCode,
-                                extras = syntheticDetails
+                                code = controlSyntheticCode,
+                                extras = controlSyntheticDetails
                             )
                             TaskRunReportHooks.onSyntheticActionResult(
                                 sessionId = snapshot.sessionId,
                                 step = step,
                                 action = action,
-                                code = syntheticCode,
-                                details = syntheticDetails
+                                code = controlSyntheticCode,
+                                details = controlSyntheticDetails
                             )
                         }
 
@@ -641,8 +641,8 @@ class SessionAutomationEngine(
                         afterObservation = afterObservation,
                         resolution = controlResolution,
                         executionResult = executionResult,
-                        syntheticCode = syntheticCode,
-                        syntheticDetails = syntheticDetails
+                        controlSyntheticCode = controlSyntheticCode,
+                        controlSyntheticDetails = controlSyntheticDetails
                     )
                     TaskRunReportHooks.onControlStepEvaluated(
                         sessionId = snapshot.sessionId,
@@ -683,7 +683,7 @@ class SessionAutomationEngine(
                     }
                     history.setLastFailureCode(sessionId, null)
 
-                    if (postResolution.shouldComplete) {
+                    if (postResolution.requestSessionComplete) {
                         history.setPendingQuestion(sessionId, null)
                         log(
                             event = "session_completed",
@@ -705,10 +705,10 @@ class SessionAutomationEngine(
                         return
                     }
 
-                    if (action is GuiAction.AskUser || postResolution.shouldAskUser) {
+                    if (action is GuiAction.AskUser || postResolution.requestUserHandoff) {
                         val question = when {
                             action is GuiAction.AskUser -> action.question
-                            else -> postResolution.askUserQuestion ?: "当前需要你接手确认下一步。"
+                            else -> postResolution.handoffQuestion ?: "当前需要你接手确认下一步。"
                         }
                         history.setPendingQuestion(sessionId, question)
                         log(

@@ -1,5 +1,12 @@
 package com.example.agenthost.session
 
+/**
+ * Overlay render-diff snapshot derived from canonical session state.
+ *
+ * It intentionally tracks only fields that affect listener-driven UI refreshes.
+ * This is not a canonical state snapshot and intentionally excludes fields such
+ * as `automationStep`.
+ */
 internal data class SessionStateListenerSnapshot(
     val sessionId: String?,
     val status: SessionStatus?,
@@ -11,7 +18,6 @@ internal data class SessionStateListenerSnapshot(
     val visibleToUser: Boolean?,
     val waitingQuestion: String?,
     val completionReturnPolicy: CompletionReturnPolicy?,
-    val pendingReturnToVirtualDisplay: Boolean?,
     val migratedToMain: Boolean?,
     val lastMigrationCode: String?,
     val lastMigrationConflictCode: String?,
@@ -23,7 +29,7 @@ internal data class SessionStateListenerSnapshot(
     val postCompletionResultCode: String?
 ) {
     companion object {
-        fun from(state: SessionState?): SessionStateListenerSnapshot {
+        fun forRenderDiff(state: SessionState?): SessionStateListenerSnapshot {
             return SessionStateListenerSnapshot(
                 sessionId = state?.sessionId,
                 status = state?.status,
@@ -35,7 +41,6 @@ internal data class SessionStateListenerSnapshot(
                 visibleToUser = state?.visibleToUser,
                 waitingQuestion = state?.waitingQuestion,
                 completionReturnPolicy = state?.completionReturnPolicy,
-                pendingReturnToVirtualDisplay = state?.pendingReturnToVirtualDisplay,
                 migratedToMain = state?.migratedToMain,
                 lastMigrationCode = state?.lastMigrationCode,
                 lastMigrationConflictCode = state?.lastMigrationConflictCode,

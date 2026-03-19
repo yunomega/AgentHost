@@ -10,8 +10,8 @@ class SessionStateListenerSnapshotTest {
         val base = baseSession()
 
         assertEquals(
-            SessionStateListenerSnapshot.from(base),
-            SessionStateListenerSnapshot.from(base.copy(automationStep = 7))
+            SessionStateListenerSnapshot.forRenderDiff(base),
+            SessionStateListenerSnapshot.forRenderDiff(base.copy(automationStep = 7))
         )
     }
 
@@ -20,8 +20,8 @@ class SessionStateListenerSnapshotTest {
         val base = baseSession()
 
         assertNotEquals(
-            SessionStateListenerSnapshot.from(base),
-            SessionStateListenerSnapshot.from(base.copy(waitingQuestion = "请输入验证码"))
+            SessionStateListenerSnapshot.forRenderDiff(base),
+            SessionStateListenerSnapshot.forRenderDiff(base.copy(waitingQuestion = "请输入验证码"))
         )
     }
 
@@ -30,8 +30,8 @@ class SessionStateListenerSnapshotTest {
         val base = baseSession()
 
         assertNotEquals(
-            SessionStateListenerSnapshot.from(base),
-            SessionStateListenerSnapshot.from(
+            SessionStateListenerSnapshot.forRenderDiff(base),
+            SessionStateListenerSnapshot.forRenderDiff(
                 base.copy(
                     status = SessionStatus.COMPLETED,
                     postCompletionDisposition = PostCompletionDisposition.CLEANUP_IMMEDIATELY,
@@ -42,12 +42,26 @@ class SessionStateListenerSnapshotTest {
         )
     }
 
+    @Test
+    fun recoveryFieldsDoChangeListenerSnapshot() {
+        val base = baseSession()
+
+        assertNotEquals(
+            SessionStateListenerSnapshot.forRenderDiff(base),
+            SessionStateListenerSnapshot.forRenderDiff(
+                base.copy(
+                    recoveryNeeded = true,
+                    lastMigrationCode = "TASK_MOVE_BACK_CONFLICT"
+                )
+            )
+        )
+    }
+
     private fun baseSession(): SessionState {
         return SessionState(
             sessionId = "session-1",
             command = "demo",
             executionDisplayId = 9,
-            currentExecutionDisplayId = 9,
             currentVisibleDisplayId = 9,
             virtualDisplayId = 9,
             surfaceDisplayId = null,
@@ -64,7 +78,6 @@ class SessionStateListenerSnapshotTest {
             backgroundPreferred = true,
             returnToVirtualAfterUser = true,
             completionReturnPolicy = CompletionReturnPolicy.CURRENT_BEHAVIOR,
-            pendingReturnToVirtualDisplay = false,
             migratedToMain = false,
             lastMigrationCode = null,
             lastMigrationDirection = null,

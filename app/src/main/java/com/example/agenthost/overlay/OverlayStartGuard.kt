@@ -15,7 +15,8 @@ internal class OverlayStartGuard(
         if (activeSession == null) {
             return startTask(command)
         }
-        if (OverlayRecoverySupport.primaryRoute(activeSession) == RecoveryPrimaryRoute.END_SESSION_TO_IDLE) {
+        val recoveryRoute = OverlayRecoverySupport.derivePrimaryRoute(activeSession)
+        if (recoveryRoute == RecoveryPrimaryRoute.END_SESSION_TO_IDLE) {
             logger(
                 OverlayAuditLog.build(
                     event = "overlay_idle_fallback_due_to_missing_task",

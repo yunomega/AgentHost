@@ -51,7 +51,7 @@ class SessionCoordinator(
 
     private val lock = Any()
     private val sessionStateListeners = linkedSetOf<SessionStateListener>()
-    private var lastSessionListenerSnapshot: SessionStateListenerSnapshot? = null
+    private var lastRenderDiffSnapshot: SessionStateListenerSnapshot? = null
     private var activeSession: SessionState? = null
         set(value) {
             field = value
@@ -113,8 +113,7 @@ class SessionCoordinator(
 	                        status = SessionStatus.WAITING_USER,
 	                        waitingQuestion = question,
                         automationStep = step,
-                        lastError = null,
-                        pendingReturnToVirtualDisplay = false
+                        lastError = null
                     )
                     activeSession = waiting
                     logInfo(
@@ -128,7 +127,7 @@ class SessionCoordinator(
                     if (waiting.displayMode == SessionDisplayMode.VIRTUAL_DISPLAY) {
                         syncExecutionDisplayPolicyStateLocked(
                             waiting,
-                            policyState = ExecutionDisplayPolicySync.STATE_USER_HANDOFF,
+                            bridgeState = ExecutionDisplayBridgeState.USER_HANDOFF,
                             reason = "waiting_user"
                         )
                         waiting = migrateTaskToMainLocked(waiting, trigger = "waiting_user")
@@ -174,7 +173,6 @@ class SessionCoordinator(
                             waitingQuestion = null,
                             automationStep = step,
                             lastError = null,
-                            pendingReturnToVirtualDisplay = false,
                             postCompletionDisposition = resolvePostCompletionDisposition(state),
                             postCompletionState = PostCompletionState.PENDING,
                             postCompletionResultCode = null
@@ -183,7 +181,7 @@ class SessionCoordinator(
                     )
                     syncExecutionDisplayPolicyStateLocked(
                         completed,
-                        policyState = ExecutionDisplayPolicySync.STATE_COMPLETED,
+                        bridgeState = ExecutionDisplayBridgeState.COMPLETED,
                         reason = "session_completed reason=$reason"
                     )
                     completed = applyCompletionReturnPolicyLocked(completed, reason = reason)
@@ -235,13 +233,12 @@ class SessionCoordinator(
                         return
                     }
                     val failed = dismissMirrorSurfaceLocked(
-                        state.copy(
-                            status = SessionStatus.FAILED,
-                            waitingQuestion = null,
-                            automationStep = step,
-                            lastError = code,
-                            pendingReturnToVirtualDisplay = false
-                        ),
+	                        state.copy(
+	                            status = SessionStatus.FAILED,
+	                            waitingQuestion = null,
+	                            automationStep = step,
+	                            lastError = code
+	                        ),
                         reason = "session_failed"
                     )
                     activeSession = failed
@@ -332,7 +329,6 @@ class SessionCoordinator(
             sessionId = sessionId,
             command = command,
             executionDisplayId = executionDisplayId,
-            currentExecutionDisplayId = executionDisplayId,
             currentVisibleDisplayId = executionDisplayId,
             virtualDisplayId = runtime?.vdDisplayId,
             surfaceDisplayId = if (resolvedMode == SessionDisplayMode.MAIN_DISPLAY) {
@@ -353,7 +349,6 @@ class SessionCoordinator(
             backgroundPreferred = resolvedMode != SessionDisplayMode.MAIN_DISPLAY,
             returnToVirtualAfterUser = options.returnToVirtualAfterUser,
             completionReturnPolicy = options.completionReturnPolicy,
-            pendingReturnToVirtualDisplay = false,
             migratedToMain = false,
             lastMigrationCode = null,
             lastMigrationDirection = null,
@@ -561,7 +556,6 @@ class SessionCoordinator(
                     status = SessionStatus.WAITING_USER,
                     waitingQuestion = state.waitingQuestion,
                     lastError = null,
-                    pendingReturnToVirtualDisplay = false,
                     recoveryNeeded = true
                 )
                 activeSession = waiting
@@ -580,23 +574,17 @@ class SessionCoordinator(
             }
             syncExecutionDisplayPolicyStateLocked(
                 returned,
-                policyState = ExecutionDisplayPolicySync.STATE_EXECUTION,
+                bridgeState = ExecutionDisplayBridgeState.EXECUTION,
                 reason = "reply_session"
             )
             refreshObservationAfterMigrationLocked(returned)
         } else {
             state
         }
-        val preResume = if (migratedState.pendingReturnToVirtualDisplay) {
-            dismissMirrorSurfaceLocked(migratedState, reason = "reply_received")
-        } else {
-            migratedState
-        }
-        val running = preResume.copy(
+        val running = migratedState.copy(
             status = SessionStatus.RUNNING,
             waitingQuestion = null,
             lastError = null,
-            pendingReturnToVirtualDisplay = false,
             recoveryNeeded = false
         )
         activeSession = running
@@ -696,13 +684,11 @@ class SessionCoordinator(
             }
         }
         if (!state.visibleToUser || state.surfaceDisplayId == null) {
-            val background = state.copy(pendingReturnToVirtualDisplay = false)
+            val background = state
             activeSession = background
             return@synchronized okResult("SESSION_ALREADY_ON_VIRTUAL_DISPLAY", background)
         }
-        val updated = dismissMirrorSurfaceLocked(state, reason = "debug_request").copy(
-            pendingReturnToVirtualDisplay = false
-        )
+        val updated = dismissMirrorSurfaceLocked(state, reason = "debug_request")
         activeSession = updated
         return@synchronized okResult("SESSION_RETURNED_TO_VIRTUAL", updated)
     }
@@ -774,8 +760,8 @@ class SessionCoordinator(
                 actionType = "NONE",
                 code = "DUMP_ACTIVE_SESSION",
                 extras = "displayMode=${state.displayMode.name} visibleToUser=${state.visibleToUser} " +
-                    "pendingReturnToVirtualDisplay=${state.pendingReturnToVirtualDisplay} " +
-                    "currentExecutionDisplayId=${state.currentExecutionDisplayId} " +
+                    "pendingReturnToVirtualDisplay=false " +
+                    "currentExecutionDisplayId=${state.executionDisplayId} " +
                     "currentVisibleDisplayId=${state.currentVisibleDisplayId ?: "null"} " +
                     "lastMigrationCode=${state.lastMigrationCode ?: "null"} " +
                     "lastMigrationDirection=${state.lastMigrationDirection ?: "null"} " +
@@ -819,8 +805,7 @@ class SessionCoordinator(
         var stopping = state.copy(
             status = SessionStatus.STOPPING,
             lastError = null,
-            waitingQuestion = null,
-            pendingReturnToVirtualDisplay = false
+            waitingQuestion = null
         )
         activeSession = stopping
         logInfo(
@@ -890,7 +875,6 @@ class SessionCoordinator(
                 lastError = null,
                 waitingQuestion = null,
                 visibleToUser = migrate && stopping.displayMode == SessionDisplayMode.MAIN_DISPLAY,
-                pendingReturnToVirtualDisplay = false,
                 migratedToMain = false
             )
             activeSession = finalState
@@ -1958,20 +1942,18 @@ class SessionCoordinator(
 
     private fun dismissMirrorSurfaceLocked(state: SessionState, reason: String): SessionState {
         if (state.displayMode == SessionDisplayMode.MAIN_DISPLAY) {
-            return state.copy(pendingReturnToVirtualDisplay = false)
+            return state
         }
         if (!state.visibleToUser || state.surfaceDisplayId == null) {
             return state.copy(
                 visibleToUser = false,
-                surfaceDisplayId = null,
-                pendingReturnToVirtualDisplay = false
+                surfaceDisplayId = null
             )
         }
         SessionSurfaceRegistry.finish(state.sessionId)
         val updated = state.copy(
             visibleToUser = false,
-            surfaceDisplayId = null,
-            pendingReturnToVirtualDisplay = false
+            surfaceDisplayId = null
         )
         logInfo(
             event = "session_surface_dismissed",
@@ -2011,8 +1993,7 @@ class SessionCoordinator(
             val failedState = failedBase.copy(
                 status = SessionStatus.FAILED,
                 lastError = code,
-                waitingQuestion = null,
-                pendingReturnToVirtualDisplay = false
+                waitingQuestion = null
             )
             activeSession = failedState
             logError(
@@ -2127,45 +2108,26 @@ class SessionCoordinator(
 
     private fun syncExecutionDisplayPolicyStateLocked(
         state: SessionState,
-        policyState: String,
+        bridgeState: ExecutionDisplayBridgeState,
         reason: String
     ) {
         if (!executionDisplayPolicySync.shouldManage(state)) {
             return
         }
-        val response = when (policyState) {
-            ExecutionDisplayPolicySync.STATE_EXECUTION ->
-                executionDisplayPolicySync.markExecution(state, reason)
-
-            ExecutionDisplayPolicySync.STATE_USER_HANDOFF ->
-                executionDisplayPolicySync.markUserHandoff(state, reason)
-
-            ExecutionDisplayPolicySync.STATE_COMPLETED ->
-                executionDisplayPolicySync.markCompleted(state, reason)
-
-            else -> {
-                logError(
-                    event = "execution_display_policy_state_failed",
-                    state = state,
-                    code = "EXECUTION_POLICY_STATE_UNSUPPORTED",
-                    extras = "policyState=$policyState reason=$reason"
-                )
-                return
-            }
-        }
+        val response = executionDisplayPolicySync.syncState(state, bridgeState, reason)
         if (response.ok) {
             logInfo(
                 event = "execution_display_policy_state_synced",
                 state = state,
                 code = response.code,
-                extras = "policyState=$policyState reason=$reason details=${response.details}"
+                extras = "policyState=${bridgeState.name} reason=$reason details=${response.details}"
             )
         } else {
             logError(
                 event = "execution_display_policy_state_failed",
                 state = state,
                 code = response.code,
-                extras = "policyState=$policyState reason=$reason details=${response.details}"
+                extras = "policyState=${bridgeState.name} reason=$reason details=${response.details}"
             )
         }
     }
@@ -2233,7 +2195,7 @@ class SessionCoordinator(
             "activeSessionId" to activeSession?.sessionId,
             "displayId" to state.executionDisplayId,
             "executionDisplayId" to state.executionDisplayId,
-            "currentExecutionDisplayId" to state.currentExecutionDisplayId,
+            "currentExecutionDisplayId" to state.executionDisplayId,
             "currentVisibleDisplayId" to state.currentVisibleDisplayId,
             "virtualDisplayId" to state.virtualDisplayId,
             "surfaceDisplayId" to state.surfaceDisplayId,
@@ -2250,7 +2212,7 @@ class SessionCoordinator(
             "backgroundPreferred" to state.backgroundPreferred,
             "returnToVirtualAfterUser" to state.returnToVirtualAfterUser,
             "completionReturnPolicy" to state.completionReturnPolicy.name,
-            "pendingReturnToVirtualDisplay" to state.pendingReturnToVirtualDisplay,
+            "pendingReturnToVirtualDisplay" to false,
             "migratedToMain" to state.migratedToMain,
             "lastMigrationCode" to state.lastMigrationCode,
             "lastMigrationDirection" to state.lastMigrationDirection,
@@ -2292,7 +2254,6 @@ class SessionCoordinator(
         return state.copy(
             waitingQuestion = null,
             lastError = null,
-            pendingReturnToVirtualDisplay = false,
             recoveryNeeded = false,
             visibleToUser = if (success) state.visibleToUser else false,
             migratedToMain = if (success) state.migratedToMain else false,
@@ -2469,8 +2430,8 @@ class SessionCoordinator(
         val sid = sessionId ?: state?.sessionId ?: "null"
         val activeState = activeSession
         val executionId = executionDisplayId ?: state?.executionDisplayId ?: -1
-        val currentExecutionId = state?.currentExecutionDisplayId
-            ?: activeState?.currentExecutionDisplayId
+        val currentExecutionId = state?.executionDisplayId
+            ?: activeState?.executionDisplayId
             ?: executionId
         val currentVisibleId = state?.currentVisibleDisplayId ?: activeState?.currentVisibleDisplayId
         val virtualId = virtualDisplayId ?: state?.virtualDisplayId ?: activeState?.virtualDisplayId
@@ -2512,11 +2473,11 @@ class SessionCoordinator(
     }
 
     private fun notifySessionStateListenersIfNeeded(session: SessionState?) {
-        val snapshot = SessionStateListenerSnapshot.from(session)
-        if (snapshot == lastSessionListenerSnapshot) {
+        val snapshot = SessionStateListenerSnapshot.forRenderDiff(session)
+        if (snapshot == lastRenderDiffSnapshot) {
             return
         }
-        lastSessionListenerSnapshot = snapshot
+        lastRenderDiffSnapshot = snapshot
         if (sessionStateListeners.isEmpty()) {
             return
         }

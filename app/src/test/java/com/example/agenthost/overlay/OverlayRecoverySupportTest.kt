@@ -16,7 +16,7 @@ class OverlayRecoverySupportTest {
 
         assertEquals(
             RecoveryPrimaryRoute.END_SESSION_TO_IDLE,
-            OverlayRecoverySupport.primaryRoute(session)
+            OverlayRecoverySupport.derivePrimaryRoute(session)
         )
     }
 
@@ -30,7 +30,7 @@ class OverlayRecoverySupportTest {
 
         assertEquals(
             RecoveryPrimaryRoute.MIGRATE_TO_EXECUTION,
-            OverlayRecoverySupport.primaryRoute(session)
+            OverlayRecoverySupport.derivePrimaryRoute(session)
         )
     }
 
@@ -44,7 +44,7 @@ class OverlayRecoverySupportTest {
 
         assertEquals(
             RecoveryPrimaryRoute.END_SESSION_TO_IDLE,
-            OverlayRecoverySupport.primaryRoute(session)
+            OverlayRecoverySupport.derivePrimaryRoute(session)
         )
     }
 
@@ -59,7 +59,7 @@ class OverlayRecoverySupportTest {
         assertTrue(OverlayRecoverySupport.isAlreadyOnMain(session))
         assertEquals(
             RecoveryPrimaryRoute.END_SESSION_TO_IDLE,
-            OverlayRecoverySupport.primaryRoute(session)
+            OverlayRecoverySupport.derivePrimaryRoute(session)
         )
     }
 
@@ -69,7 +69,7 @@ class OverlayRecoverySupportTest {
 
         assertEquals(
             RecoveryPrimaryRoute.MIGRATE_TO_MAIN,
-            OverlayRecoverySupport.primaryRoute(session)
+            OverlayRecoverySupport.derivePrimaryRoute(session)
         )
     }
 
@@ -84,7 +84,6 @@ class OverlayRecoverySupportTest {
             sessionId = "session-1",
             command = "demo",
             executionDisplayId = 9,
-            currentExecutionDisplayId = 9,
             currentVisibleDisplayId = currentVisibleDisplayId,
             virtualDisplayId = 9,
             surfaceDisplayId = surfaceDisplayId,
@@ -101,7 +100,6 @@ class OverlayRecoverySupportTest {
             backgroundPreferred = true,
             returnToVirtualAfterUser = true,
             completionReturnPolicy = CompletionReturnPolicy.CURRENT_BEHAVIOR,
-            pendingReturnToVirtualDisplay = false,
             migratedToMain = migratedToMain,
             lastMigrationCode = lastMigrationCode,
             lastMigrationDirection = if (migratedToMain) "TO_MAIN" else null,

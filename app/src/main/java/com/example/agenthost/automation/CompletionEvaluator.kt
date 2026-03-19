@@ -1,5 +1,11 @@
 package com.example.agenthost.automation
 
+/**
+ * Control-layer completion verdict only.
+ *
+ * It informs the coordinator whether automation believes the task is finished,
+ * but it is not the canonical session lifecycle state.
+ */
 enum class CompletionVerdict {
     SATISFIED,
     UNSURE,

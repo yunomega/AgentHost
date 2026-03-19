@@ -111,7 +111,6 @@ class OverlayStateMapperTest {
             baseSession(
                 displayMode = SessionDisplayMode.MAIN_DISPLAY,
                 executionDisplayId = 0,
-                currentExecutionDisplayId = 0,
                 currentVisibleDisplayId = 0,
                 virtualDisplayId = null,
                 surfaceDisplayId = 0,
@@ -234,7 +233,6 @@ class OverlayStateMapperTest {
     private fun baseSession(
         displayMode: SessionDisplayMode = SessionDisplayMode.VIRTUAL_DISPLAY,
         executionDisplayId: Int = 9,
-        currentExecutionDisplayId: Int = executionDisplayId,
         currentVisibleDisplayId: Int? = executionDisplayId,
         virtualDisplayId: Int? = executionDisplayId,
         surfaceDisplayId: Int? = null,
@@ -252,7 +250,6 @@ class OverlayStateMapperTest {
             sessionId = "session-1",
             command = "demo",
             executionDisplayId = executionDisplayId,
-            currentExecutionDisplayId = currentExecutionDisplayId,
             currentVisibleDisplayId = currentVisibleDisplayId,
             virtualDisplayId = virtualDisplayId,
             surfaceDisplayId = surfaceDisplayId,
@@ -269,7 +266,6 @@ class OverlayStateMapperTest {
             backgroundPreferred = displayMode != SessionDisplayMode.MAIN_DISPLAY,
             returnToVirtualAfterUser = true,
             completionReturnPolicy = CompletionReturnPolicy.CURRENT_BEHAVIOR,
-            pendingReturnToVirtualDisplay = false,
             migratedToMain = migratedToMain,
             lastMigrationCode = lastMigrationCode,
             lastMigrationDirection = if (migratedToMain) "TO_MAIN" else null,

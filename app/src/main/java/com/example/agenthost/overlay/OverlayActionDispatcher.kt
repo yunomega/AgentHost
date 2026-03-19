@@ -41,7 +41,8 @@ class OverlayActionDispatcher(
             requestedSessionId = sessionId,
             overlayUiState = overlayUiState
         ) { gateway, liveSession ->
-            when (OverlayRecoverySupport.primaryRoute(liveSession)) {
+            val recoveryRoute = OverlayRecoverySupport.derivePrimaryRoute(liveSession)
+            when (recoveryRoute) {
                 RecoveryPrimaryRoute.NONE -> SessionResult(ok = true, code = "NO_ACTION")
 
                 RecoveryPrimaryRoute.SURFACE_ON_MAIN -> {

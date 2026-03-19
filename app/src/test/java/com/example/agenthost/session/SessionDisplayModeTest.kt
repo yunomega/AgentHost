@@ -29,7 +29,6 @@ class SessionDisplayModeTest {
             sessionId = "s-main",
             command = "demo",
             executionDisplayId = 0,
-            currentExecutionDisplayId = 0,
             currentVisibleDisplayId = 0,
             virtualDisplayId = null,
             surfaceDisplayId = 0,
@@ -46,7 +45,6 @@ class SessionDisplayModeTest {
             backgroundPreferred = false,
             returnToVirtualAfterUser = false,
             completionReturnPolicy = CompletionReturnPolicy.CURRENT_BEHAVIOR,
-            pendingReturnToVirtualDisplay = false,
             migratedToMain = false,
             lastMigrationCode = null,
             lastMigrationDirection = null,
@@ -56,7 +54,6 @@ class SessionDisplayModeTest {
         val virtual = main.copy(
             sessionId = "s-virtual",
             executionDisplayId = 11,
-            currentExecutionDisplayId = 11,
             currentVisibleDisplayId = 11,
             virtualDisplayId = 11,
             surfaceDisplayId = null,
@@ -68,6 +65,10 @@ class SessionDisplayModeTest {
 
         assertTrue(main.isOnMainDisplay())
         assertFalse(virtual.isOnMainDisplay())
+        assertEquals(0, main.currentExecutionDisplayId)
+        assertEquals(11, virtual.currentExecutionDisplayId)
+        assertFalse(main.pendingReturnToVirtualDisplay)
+        assertFalse(virtual.pendingReturnToVirtualDisplay)
         assertFalse(main.recoveryNeeded)
         assertFalse(virtual.recoveryNeeded)
     }

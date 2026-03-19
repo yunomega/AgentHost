@@ -8,6 +8,12 @@ data class ObservationFingerprint(
     val hash: String
 )
 
+/**
+ * Control-step result taxonomy only.
+ *
+ * These values summarize automation progress for planner/report consumers and
+ * must not be treated as canonical session lifecycle states.
+ */
 enum class StepResultCategory {
     SUCCESS_CHANGED,
     SUCCESS_NO_CHANGE,

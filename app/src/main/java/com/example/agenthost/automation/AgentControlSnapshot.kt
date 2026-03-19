@@ -9,6 +9,12 @@ data class AgentControlRecentAction(
     val phaseAfter: String? = null
 )
 
+/**
+ * Planner/report-facing control snapshot.
+ *
+ * This is derived from [GuardrailState] and never owns or mirrors canonical
+ * session lifecycle transitions.
+ */
 data class AgentControlSnapshot(
     val globalTask: String,
     val currentPhase: String,
