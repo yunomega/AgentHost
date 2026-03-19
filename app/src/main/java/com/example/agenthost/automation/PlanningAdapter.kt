@@ -11,7 +11,8 @@ data class PlanningRequest(
     val observation: ObservationResult,
     val recentActions: List<HistoryActionRecord>,
     val lastFailureCode: String?,
-    val lastUserReply: String?
+    val lastUserReply: String?,
+    val controlSnapshot: AgentControlSnapshot? = null
 )
 
 interface PlanningAdapter {

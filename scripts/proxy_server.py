@@ -327,21 +327,6 @@ def normalize_image_data_url(value: str) -> str:
 
 
 def build_system_prompt(payload: dict[str, Any]) -> str:
-    context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
-    capability_profile = (
-        context.get("capabilityProfile")
-        if isinstance(context.get("capabilityProfile"), dict)
-        else {}
-    )
-    agent_control = (
-        context.get("agentControl")
-        if isinstance(context.get("agentControl"), dict)
-        else {}
-    )
-    allowed_actions, blocked_actions, unknown_actions = build_capability_hint(
-        capability_profile
-    )
-
     lines = [
         "You are a GUI Agent acting for Android AgentHost.",
         "Return exactly one raw JSON object and nothing else.",
@@ -352,14 +337,8 @@ def build_system_prompt(payload: dict[str, Any]) -> str:
         "Supported action names in this protocol are: CLICK, LONG_PRESS, SWIPE, TYPE_TEXT, BACK, HOME, WAIT, ASK_USER, DONE.",
         "Use the current screenshot as the main source of truth.",
         "If the requested destination, page, toggle, or list item is already open or clearly visible, return DONE immediately.",
-        "Do not backtrack, reopen search, or navigate to a broader page when the screenshot already shows the target.",
-        "Do not loop on the same goal: avoid repeating the same or nearby CLICK unless the screenshot clearly justifies it.",
         "Only use TYPE_TEXT when text entry is clearly required and the target is not already visible on screen.",
-        f"Allowed actions for this request: {', '.join(allowed_actions) if allowed_actions else 'NONE'}.",
-        f"Blocked or unsupported actions for this request: {', '.join(blocked_actions) if blocked_actions else 'NONE'}.",
-        f"Unknown or unspecified actions for this request: {', '.join(unknown_actions) if unknown_actions else 'NONE'}.",
-        f"Capability summary: {context.get('capabilitySummary') or 'n/a'}",
-        f"Capability profile JSON: {compact_json(capability_profile) if capability_profile else '{}'}",
+        "Dynamic task context, current phase, capability limits, recent history, and failure hints appear in the user message. Follow them strictly.",
         'Example valid output: {"action":"CLICK","x":500,"y":500}',
         'Example valid output: {"action":"SWIPE","x1":500,"y1":800,"x2":500,"y2":300,"durationMs":400}',
         'Example valid output: {"action":"TYPE_TEXT","text":"hello123"}',
@@ -367,24 +346,61 @@ def build_system_prompt(payload: dict[str, Any]) -> str:
         'Example valid output: {"action":"DONE","reason":"task_complete"}',
     ]
 
-    control_phase = str(agent_control.get("currentPhase") or "").strip()
-    if control_phase:
-        lines.append(f"Current control phase: {control_phase}.")
-    control_allowed = agent_control.get("allowedActions")
-    if isinstance(control_allowed, list) and control_allowed:
-        lines.append(f"System-allowed actions now: {', '.join(str(item) for item in control_allowed)}.")
-    control_blocked = agent_control.get("blockedActions")
-    if isinstance(control_blocked, list) and control_blocked:
-        lines.append(f"System-blocked actions now: {', '.join(str(item) for item in control_blocked)}.")
-    if agent_control.get("doneOnly") is True:
-        lines.append("The system has already marked the target as completed. Only return DONE or ASK_USER.")
-    elif control_phase == "NEED_OPEN_PARENT":
-        lines.append("Focus on opening the parent destination first. Avoid exploratory backtracking.")
-    elif control_phase == "NEED_CLICK_TARGET":
-        lines.append("Focus on clicking the target item once or scrolling to find it. Avoid BACK and HOME.")
-    elif control_phase == "TARGET_CLICKED_PENDING_SETTLE":
-        lines.append("The target may already be complete. Prefer DONE, ASK_USER, or WAIT. Do not keep clicking.")
+    return "\n".join(lines)
 
+
+def build_user_text(payload: dict[str, Any]) -> str:
+    context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
+    observation = (
+        context.get("observation") if isinstance(context.get("observation"), dict) else {}
+    )
+    capability_profile = (
+        context.get("capabilityProfile")
+        if isinstance(context.get("capabilityProfile"), dict)
+        else {}
+    )
+    recent_actions = context.get("recentActions") if isinstance(context.get("recentActions"), list) else []
+    agent_control = (
+        context.get("agentControl") if isinstance(context.get("agentControl"), dict) else {}
+    )
+    capability_allowed, capability_blocked, capability_unknown = build_capability_hint(
+        capability_profile
+    )
+
+    lines = ["Task:"]
+    lines.append(f"User command: {context.get('command') or payload.get('userPrompt') or ''}")
+    lines.append(f"Step: {payload.get('step')}")
+    lines.append(f"SessionId: {payload.get('sessionId')}")
+    lines.append("")
+
+    lines.append("Observation:")
+    lines.append(f"Observation status: {observation.get('status') or 'UNKNOWN'}")
+
+    width = observation.get("width")
+    height = observation.get("height")
+    if width not in (None, -1) and height not in (None, -1):
+        lines.append(f"Observation size: {width}x{height}")
+
+    if observation.get("code"):
+        lines.append(f"Observation code: {observation.get('code')}")
+    if observation.get("message"):
+        lines.append(f"Observation message: {observation.get('message')}")
+    lines.append("")
+
+    lines.append("Capabilities:")
+    lines.append(f"Capability summary: {context.get('capabilitySummary') or 'n/a'}")
+    lines.append(
+        f"Capability profile JSON: {compact_json(capability_profile) if capability_profile else '{}'}"
+    )
+    lines.append(
+        f"Capability-allowed actions: {', '.join(capability_allowed) if capability_allowed else 'NONE'}"
+    )
+    lines.append(
+        f"Capability-blocked actions: {', '.join(capability_blocked) if capability_blocked else 'NONE'}"
+    )
+    lines.append(
+        f"Capability-unknown actions: {', '.join(capability_unknown) if capability_unknown else 'NONE'}"
+    )
     text_level = str(capability_profile.get("textSupportLevel") or "").strip().upper()
     if text_level == "ASCII_BASIC":
         lines.append(
@@ -396,43 +412,9 @@ def build_system_prompt(payload: dict[str, Any]) -> str:
         lines.append(
             "If non-ASCII text would be needed, choose another allowed action instead of TYPE_TEXT."
         )
+    lines.append("")
 
-    last_failure_code = context.get("lastFailureCode")
-    if last_failure_code:
-        lines.append(f"Last failure code: {last_failure_code}")
-    last_user_reply = context.get("lastUserReply")
-    if last_user_reply:
-        lines.append(f"Last user reply: {last_user_reply}")
-
-    return "\n".join(lines)
-
-
-def build_user_text(payload: dict[str, Any]) -> str:
-    context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
-    observation = (
-        context.get("observation") if isinstance(context.get("observation"), dict) else {}
-    )
-    recent_actions = context.get("recentActions") if isinstance(context.get("recentActions"), list) else []
-    agent_control = (
-        context.get("agentControl") if isinstance(context.get("agentControl"), dict) else {}
-    )
-
-    lines = [
-        f"User command: {context.get('command') or payload.get('userPrompt') or ''}",
-        f"Step: {payload.get('step')}",
-        f"SessionId: {payload.get('sessionId')}",
-        f"Observation status: {observation.get('status') or 'UNKNOWN'}",
-    ]
-
-    width = observation.get("width")
-    height = observation.get("height")
-    if width not in (None, -1) and height not in (None, -1):
-        lines.append(f"Observation size: {width}x{height}")
-
-    if observation.get("code"):
-        lines.append(f"Observation code: {observation.get('code')}")
-    if observation.get("message"):
-        lines.append(f"Observation message: {observation.get('message')}")
+    lines.append("Phase and action constraints:")
     if agent_control.get("currentPhase"):
         lines.append(f"Current phase: {agent_control.get('currentPhase')}")
     if agent_control.get("parentHint"):
@@ -449,9 +431,18 @@ def build_user_text(payload: dict[str, Any]) -> str:
     blocked_actions = agent_control.get("blockedActions")
     if isinstance(blocked_actions, list) and blocked_actions:
         lines.append(f"Blocked actions now: {', '.join(str(item) for item in blocked_actions)}")
+    control_phase = str(agent_control.get("currentPhase") or "").strip()
     if agent_control.get("doneOnly") is True:
-        lines.append("DONE_ONLY is active: do not continue clicking or swiping.")
+        lines.append("Phase guidance: The system has already marked the target as completed. Only return DONE or ASK_USER.")
+    elif control_phase == "NEED_OPEN_PARENT":
+        lines.append("Phase guidance: Focus on opening the parent destination first. Avoid exploratory backtracking.")
+    elif control_phase == "NEED_CLICK_TARGET":
+        lines.append("Phase guidance: Focus on clicking the target item once or scrolling to find it. Avoid BACK and HOME.")
+    elif control_phase == "TARGET_CLICKED_PENDING_SETTLE":
+        lines.append("Phase guidance: The target may already be complete. Prefer DONE, ASK_USER, or WAIT. Do not keep clicking.")
+    lines.append("")
 
+    lines.append("History:")
     if recent_actions:
         lines.append(f"Recent action count: {len(recent_actions)}")
         for action in recent_actions[-3:]:
@@ -462,6 +453,8 @@ def build_user_text(payload: dict[str, Any]) -> str:
                 f"step={action.get('step')} type={action.get('actionType')} "
                 f"code={action.get('code')} summary={action.get('summary')}"
             )
+    else:
+        lines.append("Recent action count: 0")
 
     control_recent_actions = agent_control.get("recentActions")
     if isinstance(control_recent_actions, list) and control_recent_actions:
@@ -479,14 +472,21 @@ def build_user_text(payload: dict[str, Any]) -> str:
                 f"result={action.get('resultCategory')} phase={action.get('phaseAfter')}{point_summary} "
                 f"summary={action.get('summary')}"
             )
+    else:
+        lines.append("Recent control action count: 0")
+    lines.append("")
+
+    lines.append("Failure and reply context:")
     if context.get("lastFailureCode"):
         lines.append(f"Last failure code: {context.get('lastFailureCode')}")
     if context.get("lastUserReply"):
         lines.append(f"Last user reply: {context.get('lastUserReply')}")
+    if not context.get("lastFailureCode") and not context.get("lastUserReply"):
+        lines.append("No last failure code or user reply.")
+    lines.append("")
 
-    lines.append(
-        "Choose the single best next action based on the screenshot and capabilities."
-    )
+    lines.append("Decision:")
+    lines.append("Choose the single best next action based on the screenshot and the dynamic context above.")
     return "\n".join(lines)
 
 

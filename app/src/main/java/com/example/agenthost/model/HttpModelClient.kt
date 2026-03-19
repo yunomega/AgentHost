@@ -173,6 +173,7 @@ class HttpModelClient(
                 "}"
         }
         val capability = context.capabilityProfile
+        val controlSnapshot = context.controlSnapshot
         return buildString {
             append("{")
             append("\"sessionId\":\"").append(jsonEscape(context.sessionId)).append("\",")
@@ -218,6 +219,57 @@ class HttpModelClient(
             append(',')
             append("\"lastUserReply\":")
             if (context.lastUserReply == null) append("null") else append("\"").append(jsonEscape(context.lastUserReply)).append("\"")
+            append(',')
+            append("\"agentControl\":")
+            if (controlSnapshot == null) {
+                append("null")
+            } else {
+                append("{")
+                append("\"globalTask\":\"").append(jsonEscape(controlSnapshot.globalTask)).append("\",")
+                append("\"currentPhase\":\"").append(jsonEscape(controlSnapshot.currentPhase)).append("\",")
+                append("\"parentHint\":")
+                if (controlSnapshot.parentHint == null) append("null") else append("\"").append(jsonEscape(controlSnapshot.parentHint)).append("\"")
+                append(',')
+                append("\"targetHint\":")
+                if (controlSnapshot.targetHint == null) append("null") else append("\"").append(jsonEscape(controlSnapshot.targetHint)).append("\"")
+                append(',')
+                append("\"allowedActions\":[")
+                append(controlSnapshot.allowedActions.joinToString(",") { "\"${jsonEscape(it)}\"" })
+                append("],")
+                append("\"blockedActions\":[")
+                append(controlSnapshot.blockedActions.joinToString(",") { "\"${jsonEscape(it)}\"" })
+                append("],")
+                append("\"recentActions\":[")
+                append(
+                    controlSnapshot.recentActions.joinToString(",") { action ->
+                        buildString {
+                            append("{")
+                            append("\"step\":").append(action.step).append(',')
+                            append("\"actionType\":\"").append(jsonEscape(action.actionType)).append("\",")
+                            append("\"resultCategory\":\"").append(jsonEscape(action.resultCategory)).append("\",")
+                            append("\"summary\":\"").append(jsonEscape(action.summary)).append("\",")
+                            append("\"phaseAfter\":")
+                            if (action.phaseAfter == null) append("null") else append("\"").append(jsonEscape(action.phaseAfter)).append("\"")
+                            append(',')
+                            append("\"approxPoint\":")
+                            if (action.approxPoint == null) {
+                                append("null")
+                            } else {
+                                append("{\"x\":").append(action.approxPoint.x)
+                                append(",\"y\":").append(action.approxPoint.y).append("}")
+                            }
+                            append("}")
+                        }
+                    }
+                )
+                append("],")
+                append("\"lastResult\":")
+                if (controlSnapshot.lastResult == null) append("null") else append("\"").append(jsonEscape(controlSnapshot.lastResult)).append("\"")
+                append(',')
+                append("\"completionState\":\"").append(jsonEscape(controlSnapshot.completionState)).append("\",")
+                append("\"doneOnly\":").append(controlSnapshot.doneOnly)
+                append("}")
+            }
             append("}")
             append("}")
         }

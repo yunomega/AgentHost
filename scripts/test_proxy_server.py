@@ -112,11 +112,13 @@ class ProxyServerPlanTest(unittest.TestCase):
         messages = upstream_payload["messages"]
         system_prompt = messages[0]["content"]
         user_text = messages[1]["content"][0]["text"]
-        self.assertIn("Current control phase: NEED_CLICK_TARGET.", system_prompt)
-        self.assertIn("System-allowed actions now: ASK_USER, CLICK, DONE, SWIPE.", system_prompt)
-        self.assertIn("System-blocked actions now: BACK, HOME.", system_prompt)
+        self.assertIn("Dynamic task context, current phase, capability limits, recent history, and failure hints appear in the user message.", system_prompt)
+        self.assertNotIn("NEED_CLICK_TARGET", system_prompt)
+        self.assertNotIn("ASK_USER, CLICK, DONE, SWIPE", system_prompt)
         self.assertIn("Current phase: NEED_CLICK_TARGET", user_text)
         self.assertIn("Target hint: 语燕输入法", user_text)
+        self.assertIn("Capabilities:", user_text)
+        self.assertIn("History:", user_text)
         self.assertIn("Recent control action: step=2 type=CLICK result=SUCCESS_NO_CHANGE", user_text)
 
     def test_done_only_prompt_constrains_output_and_meta_uses_none_coord_space(self):
@@ -148,8 +150,8 @@ class ProxyServerPlanTest(unittest.TestCase):
 
         system_prompt = fake_session.calls[0]["json"]["messages"][0]["content"]
         user_text = fake_session.calls[0]["json"]["messages"][1]["content"][0]["text"]
-        self.assertIn("Only return DONE or ASK_USER.", system_prompt)
-        self.assertIn("DONE_ONLY is active: do not continue clicking or swiping.", user_text)
+        self.assertNotIn("Only return DONE or ASK_USER.", system_prompt)
+        self.assertIn("Phase guidance: The system has already marked the target as completed. Only return DONE or ASK_USER.", user_text)
 
     def test_android_legacy_prompt_fields_are_not_forwarded_to_upstream_prompt(self):
         fake_session = FakeSession(
