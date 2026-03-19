@@ -498,6 +498,7 @@ object TaskRunReportHooks {
 
     fun finalizeRun(
         sessionId: String,
+        finalSnapshot: SessionState?,
         finalState: String,
         finalOutcome: String,
         activeSessionResidual: Boolean,
@@ -521,13 +522,17 @@ object TaskRunReportHooks {
                     event = "report_finalize",
                     code = finalCode,
                     status = finalState,
-                    automationStep = run.steps.keys.maxOrNull(),
-                    migratedToMain = lastEvent?.migratedToMain,
-                    recoveryNeeded = lastEvent?.recoveryNeeded,
-                    currentVisibleDisplayId = lastEvent?.currentVisibleDisplayId,
-                    lastMigrationDirection = lastEvent?.lastMigrationDirection,
-                    lastMigrationCode = lastEvent?.lastMigrationCode,
-                    lastError = if (finalOutcome == "failed") finalCode else lastEvent?.lastError
+                    automationStep = finalSnapshot?.automationStep ?: run.steps.keys.maxOrNull(),
+                    migratedToMain = finalSnapshot?.migratedToMain,
+                    recoveryNeeded = finalSnapshot?.recoveryNeeded,
+                    currentVisibleDisplayId = finalSnapshot?.currentVisibleDisplayId,
+                    lastMigrationDirection = finalSnapshot?.lastMigrationDirection,
+                    lastMigrationCode = finalSnapshot?.lastMigrationCode,
+                    lastError = when {
+                        finalSnapshot?.lastError != null -> finalSnapshot.lastError
+                        finalOutcome == "failed" -> finalCode
+                        else -> null
+                    }
                 )
             }
             run.steps.values.forEach { step ->

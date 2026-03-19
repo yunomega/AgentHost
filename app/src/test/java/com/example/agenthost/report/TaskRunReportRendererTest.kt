@@ -68,6 +68,94 @@ class TaskRunReportRendererTest {
     }
 
     @Test
+    fun askUserActionAloneDoesNotImplyWaitingUserTerminalState() {
+        val report = TaskRunReportAnalyzer.buildReport(
+            runKey = "run-ask-user-terminal",
+            overview = overview(finalSessionState = "FAILED", finalOutcome = "failed"),
+            steps = listOf(
+                step(
+                    parsedActionType = "ASK_USER",
+                    modelReturnedSuccessfully = true
+                )
+            ),
+            lifecycle = lifecycle(
+                lastEvent = TaskRunLifecycleEvent(
+                    timeMs = 2_000L,
+                    event = "report_finalize",
+                    code = "AUTOMATION_STOPPED",
+                    status = "FAILED",
+                    automationStep = 1,
+                    migratedToMain = false,
+                    recoveryNeeded = false,
+                    currentVisibleDisplayId = 3,
+                    lastMigrationDirection = null,
+                    lastMigrationCode = null,
+                    lastError = "AUTOMATION_STOPPED"
+                )
+            )
+        )
+
+        assertEquals("INTERRUPTED", report.resultTag)
+        assertEquals("UNKNOWN", report.diagnostics.likelyProblemLayer)
+    }
+
+    @Test
+    fun timelineMigrationFlagsDoNotOverrideCanonicalFinalSnapshot() {
+        val report = TaskRunReportAnalyzer.buildReport(
+            runKey = "run-migration-flags",
+            overview = overview(finalSessionState = "FAILED", finalOutcome = "failed"),
+            steps = emptyList(),
+            lifecycle = lifecycle(
+                migratedToMainOccurred = true,
+                recoveryNeededSeen = true,
+                lastEvent = TaskRunLifecycleEvent(
+                    timeMs = 2_000L,
+                    event = "report_finalize",
+                    code = "FAILED",
+                    status = "FAILED",
+                    automationStep = 0,
+                    migratedToMain = false,
+                    recoveryNeeded = false,
+                    currentVisibleDisplayId = 3,
+                    lastMigrationDirection = null,
+                    lastMigrationCode = null,
+                    lastError = "FAILED"
+                )
+            )
+        )
+
+        assertEquals("INTERRUPTED", report.resultTag)
+        assertEquals("UNKNOWN", report.diagnostics.likelyProblemLayer)
+    }
+
+    @Test
+    fun finalSnapshotRecoveryCodeStillMapsToMigrationDiagnosis() {
+        val report = TaskRunReportAnalyzer.buildReport(
+            runKey = "run-final-snapshot-migration",
+            overview = overview(finalSessionState = "FAILED", finalOutcome = "failed"),
+            steps = emptyList(),
+            lifecycle = lifecycle(
+                lastEvent = TaskRunLifecycleEvent(
+                    timeMs = 2_000L,
+                    event = "report_finalize",
+                    code = "TARGET_TASK_REMOVED",
+                    status = "FAILED",
+                    automationStep = 2,
+                    migratedToMain = true,
+                    recoveryNeeded = true,
+                    currentVisibleDisplayId = 0,
+                    lastMigrationDirection = "TO_MAIN",
+                    lastMigrationCode = "TARGET_TASK_REMOVED",
+                    lastError = "TARGET_TASK_REMOVED"
+                )
+            )
+        )
+
+        assertEquals("INTERRUPTED", report.resultTag)
+        assertEquals("MIGRATION", report.diagnostics.likelyProblemLayer)
+    }
+
+    @Test
     fun markdownSummarizesRawResponseButJsonKeepsFullText() {
         val tail = "TAIL_MARKER_1234567890"
         val rawResponse = "{\"action\":\"CLICK\",\"x\":120,\"y\":300,\"reason\":\"" +
@@ -217,7 +305,12 @@ class TaskRunReportRendererTest {
         )
     }
 
-    private fun lifecycle(activeSessionResidualAfterEnd: Boolean = false): TaskRunLifecycle {
+    private fun lifecycle(
+        activeSessionResidualAfterEnd: Boolean = false,
+        migratedToMainOccurred: Boolean = false,
+        recoveryNeededSeen: Boolean = false,
+        lastEvent: TaskRunLifecycleEvent? = null
+    ): TaskRunLifecycle {
         return TaskRunLifecycle(
             events = listOf(
                 TaskRunLifecycleEvent(
@@ -233,10 +326,10 @@ class TaskRunReportRendererTest {
                     lastMigrationCode = null,
                     lastError = null
                 )
-            ),
-            migratedToMainOccurred = false,
+            ) + listOfNotNull(lastEvent),
+            migratedToMainOccurred = migratedToMainOccurred,
             migrateBackOccurred = false,
-            recoveryNeededSeen = false,
+            recoveryNeededSeen = recoveryNeededSeen,
             activeSessionResidualAfterEnd = activeSessionResidualAfterEnd
         )
     }

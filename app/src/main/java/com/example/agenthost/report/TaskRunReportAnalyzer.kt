@@ -1,5 +1,7 @@
 package com.example.agenthost.report
 
+import com.example.agenthost.migration.TaskMigrationPolicy
+
 object TaskRunReportAnalyzer {
     fun buildReport(
         runKey: String,
@@ -58,7 +60,7 @@ object TaskRunReportAnalyzer {
                 return "COMPLETED_STATE_MISMATCH"
             }
         }
-        if (overview.finalSessionState == "WAITING_USER" || steps.lastOrNull()?.parsedActionType == "ASK_USER") {
+        if (overview.finalSessionState == "WAITING_USER") {
             return "WAITING_USER_STALLED"
         }
         return "INTERRUPTED"
@@ -196,12 +198,18 @@ object TaskRunReportAnalyzer {
                 "NONE"
             }
         }
+        val finalSnapshot = finalRuntimeSnapshot(lifecycle)
         return steps.firstOrNull { it.failureLayer != null || it.platformOk == false }?.failureLayer
             ?: when {
-                lifecycle.migratedToMainOccurred && lifecycle.recoveryNeededSeen -> "MIGRATION"
+                finalSnapshot?.recoveryNeeded == true -> "MIGRATION"
+                TaskMigrationPolicy.requiresRecovery(finalSnapshot?.lastMigrationCode) -> "MIGRATION"
                 overview.finalSessionState == "WAITING_USER" -> "STATE_MISMATCH"
-            else -> "UNKNOWN"
-        }
+                else -> "UNKNOWN"
+            }
+    }
+
+    private fun finalRuntimeSnapshot(lifecycle: TaskRunLifecycle): TaskRunLifecycleEvent? {
+        return lifecycle.events.lastOrNull()
     }
 
     private fun rate(count: Int, total: Int): Double {

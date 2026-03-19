@@ -25,6 +25,7 @@ import com.example.agenthost.migration.TaskMigrationController
 import com.example.agenthost.migration.TaskMigrationPolicy
 import com.example.agenthost.migration.TaskMigrationTarget
 import com.example.agenthost.migration.TaskValidationResult
+import com.example.agenthost.overlay.OverlayStateMapper
 import com.example.agenthost.platform.AgentHostPlatformClient
 import com.example.agenthost.runtime.VirtualDisplayRuntime
 import java.util.UUID
@@ -69,6 +70,7 @@ class SessionCoordinator(
     private val executionDisplayPolicySync = ExecutionDisplayPolicySync(platformGateway)
     private val observationProvider: ObservationProvider = PlatformObservationProvider(platformGateway)
     private val actionExecutor: DisplayActionExecutor = PlatformDisplayActionExecutor(platformGateway)
+    private val overlayStateMapper = OverlayStateMapper()
     private val automationEngine: SessionAutomationEngine = SessionAutomationEngine(
         callbacks = object : AutomationStateCallbacks {
             override fun getSnapshot(sessionId: String): AutomationSessionSnapshot? {
@@ -198,6 +200,7 @@ class SessionCoordinator(
                     // snapshot remains available to report generation.
 	                    TaskRunReportHooks.finalizeRun(
 	                        sessionId = completed.sessionId,
+                            finalSnapshot = completed,
 	                        finalState = completed.status.name,
                         finalOutcome = "success",
 	                        activeSessionResidual = false,
@@ -252,6 +255,7 @@ class SessionCoordinator(
                     )
                     TaskRunReportHooks.finalizeRun(
                         sessionId = failed.sessionId,
+                        finalSnapshot = failed,
                         finalState = failed.status.name,
                         finalOutcome = "failed",
                         activeSessionResidual = true,
@@ -299,6 +303,7 @@ class SessionCoordinator(
         if (resolvedMode == SessionDisplayMode.VIRTUAL_DISPLAY && !supportsSecondaryDisplays()) {
             TaskRunReportHooks.finalizeRun(
                 sessionId = sessionId,
+                finalSnapshot = null,
                 finalState = SessionStatus.FAILED.name,
                 finalOutcome = "failed",
                 activeSessionResidual = false,
@@ -516,6 +521,7 @@ class SessionCoordinator(
             )
             TaskRunReportHooks.finalizeRun(
                 sessionId = failed.sessionId,
+                finalSnapshot = failed,
                 finalState = failed.status.name,
                 finalOutcome = "failed",
                 activeSessionResidual = true,
@@ -559,7 +565,7 @@ class SessionCoordinator(
                     recoveryNeeded = true
                 )
                 activeSession = waiting
-                val failCode = if (isMigrationPrecheckFailureCode(returned.lastMigrationCode)) {
+                val failCode = if (TaskMigrationPolicy.isPrecheckFailure(returned.lastMigrationCode)) {
                     "TASK_MIGRATION_PRECHECK_FAILED"
                 } else {
                     returned.lastMigrationCode ?: "TASK_MOVE_BACK_FAILED"
@@ -645,6 +651,7 @@ class SessionCoordinator(
             )
             TaskRunReportHooks.finalizeRun(
                 sessionId = failed.sessionId,
+                finalSnapshot = failed,
                 finalState = failed.status.name,
                 finalOutcome = "failed",
                 activeSessionResidual = true,
@@ -901,6 +908,7 @@ class SessionCoordinator(
             )
             TaskRunReportHooks.finalizeRun(
                 sessionId = finalState.sessionId,
+                finalSnapshot = finalState,
                 finalState = finalState.status.name,
                 finalOutcome = "interrupted",
                 activeSessionResidual = false,
@@ -1747,19 +1755,6 @@ class SessionCoordinator(
         )
     }
 
-    private fun isMigrationPrecheckFailureCode(code: String?): Boolean {
-        return code in setOf(
-            "TASK_CONFLICT_ON_MAIN",
-            "USER_OWNS_MAIN_INSTANCE",
-            "TARGET_TASK_REMOVED",
-            "TASK_ID_STALE",
-            "TASK_NOT_ON_EXPECTED_DISPLAY",
-            "TASK_MOVE_BACK_CONFLICT",
-            "TASK_QUERY_UNSUPPORTED",
-            "TARGET_TASK_NOT_FOUND"
-        )
-    }
-
     private fun SessionState.toBoundTaskTarget(): TaskMigrationTarget? {
         if (lastKnownTaskId <= 0) {
             return null
@@ -2029,6 +2024,7 @@ class SessionCoordinator(
             )
             TaskRunReportHooks.finalizeRun(
                 sessionId = failedState.sessionId,
+                finalSnapshot = failedState,
                 finalState = failedState.status.name,
                 finalOutcome = "failed",
                 activeSessionResidual = false,
@@ -2052,6 +2048,7 @@ class SessionCoordinator(
         reportSessionId?.let {
             TaskRunReportHooks.finalizeRun(
                 sessionId = it,
+                finalSnapshot = null,
                 finalState = SessionStatus.FAILED.name,
                 finalOutcome = "failed",
                 activeSessionResidual = false,
@@ -2484,7 +2481,7 @@ class SessionCoordinator(
         val activeSessionId = activeState?.sessionId ?: "null"
         val displayId = currentVisibleId ?: currentExecutionId
         val returnPolicy = state?.completionReturnPolicy?.name ?: activeState?.completionReturnPolicy?.name ?: "null"
-        val overlayUiState = overlayUiStateLabel(state ?: activeState)
+        val overlayUiState = overlayStateMapper.modeName(state ?: activeState)
         val stp = step ?: state?.automationStep ?: 0
         val at = actionType ?: "NONE"
         val ext = extras ?: "{}"
@@ -2525,26 +2522,6 @@ class SessionCoordinator(
         }
         sessionStateListeners.forEach { listener ->
             listener.onSessionChanged(session)
-        }
-    }
-
-    private fun overlayUiStateLabel(state: SessionState?): String {
-        if (state == null || state.status in setOf(SessionStatus.CLOSED, SessionStatus.MIGRATED)) {
-            return "IDLE"
-        }
-        if (state.status == SessionStatus.COMPLETED) {
-            return "POST_COMPLETION"
-        }
-        if (state.recoveryNeeded ||
-            state.status == SessionStatus.FAILED ||
-            TaskMigrationPolicy.requiresRecovery(state.lastMigrationCode)
-        ) {
-            return "RECOVERY"
-        }
-        return when {
-            state.status == SessionStatus.WAITING_USER && state.migratedToMain -> "HANDOFF_ACTIVE"
-            state.status == SessionStatus.WAITING_USER -> "NEED_USER"
-            else -> "RUNNING"
         }
     }
 }

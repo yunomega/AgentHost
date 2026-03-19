@@ -200,6 +200,37 @@ class OverlayStateMapperTest {
         assertFalse(state.message.orEmpty().contains("恢复"))
     }
 
+    @Test
+    fun modeNameUsesSameCanonicalMappingAsRenderedUiState() {
+        val sessions = listOf(
+            null,
+            baseSession(status = SessionStatus.RUNNING),
+            baseSession(status = SessionStatus.WAITING_USER, waitingQuestion = "请输入验证码"),
+            baseSession(
+                status = SessionStatus.WAITING_USER,
+                waitingQuestion = "请输入验证码",
+                migratedToMain = true,
+                currentVisibleDisplayId = 0,
+                lastMigrationCode = "TASK_MIGRATION_OK"
+            ),
+            baseSession(
+                status = SessionStatus.FAILED,
+                recoveryNeeded = true,
+                lastMigrationCode = "TASK_MOVE_BACK_CONFLICT"
+            ),
+            baseSession(
+                status = SessionStatus.COMPLETED,
+                postCompletionDisposition = PostCompletionDisposition.CLEANUP_IMMEDIATELY,
+                postCompletionState = PostCompletionState.SUCCEEDED,
+                postCompletionResultCode = "COMPLETION_CLEANUP_READY"
+            )
+        )
+
+        sessions.forEach { session ->
+            assertEquals(mapper.map(session).mode.name, mapper.modeName(session))
+        }
+    }
+
     private fun baseSession(
         displayMode: SessionDisplayMode = SessionDisplayMode.VIRTUAL_DISPLAY,
         executionDisplayId: Int = 9,

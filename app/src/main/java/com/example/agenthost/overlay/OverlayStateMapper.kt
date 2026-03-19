@@ -8,6 +8,10 @@ import com.example.agenthost.session.PostCompletionState
 import com.example.agenthost.session.SessionDisplayMode
 
 class OverlayStateMapper {
+    // This mapper is the only owner of canonical session -> overlay presentation mode.
+    // It may consume canonical state only; controller-retained UI state stays outside.
+    fun modeName(session: SessionState?): String = map(session).mode.name
+
     fun map(session: SessionState?): OverlayUiState {
         if (session == null || session.status in TERMINAL_STATUSES) {
             return OverlayUiState(

@@ -39,6 +39,15 @@ class TaskMigrationPolicyTest {
     }
 
     @Test
+    fun precheckFailureOnlyMatchesCanonicalPrecheckCodes() {
+        assertTrue(TaskMigrationPolicy.isPrecheckFailure("USER_OWNS_MAIN_INSTANCE"))
+        assertTrue(TaskMigrationPolicy.isPrecheckFailure("TARGET_TASK_NOT_FOUND"))
+        assertFalse(TaskMigrationPolicy.isPrecheckFailure("TASK_MIGRATION_PRECHECK_FAILED"))
+        assertFalse(TaskMigrationPolicy.isPrecheckFailure("TASK_MOVE_FAILED"))
+        assertFalse(TaskMigrationPolicy.isPrecheckFailure(null))
+    }
+
+    @Test
     fun samePackageDifferentTaskCountsAsUserOwnedConflict() {
         val expected = TaskMigrationTarget(
             taskId = 42,
