@@ -1,6 +1,7 @@
 package com.example.agenthost.automation
 
 import com.example.agenthost.core.AgentHostLog
+import com.example.agenthost.debug.TaskRunReportHooks
 import com.example.agenthost.model.ModelActionHistoryEntry
 import com.example.agenthost.model.ModelClient
 import com.example.agenthost.model.ModelContext
@@ -14,6 +15,7 @@ class ModelPlanningAdapter(
     private val modelClient: ModelClient,
     private val actionParser: ActionParser = StrictJsonActionParser(),
     private val capabilityValidator: CapabilityValidator = CapabilityValidator(),
+    private val canonicalActionMapper: CanonicalActionMapper = CanonicalActionMapper(),
     private val maxResponseChars: Int = 4_096
 ) : PlanningAdapter {
     companion object {
@@ -23,9 +25,10 @@ class ModelPlanningAdapter(
     override fun modeForSession(sessionId: String): PlanningMode = mode
 
     override fun planNext(request: PlanningRequest): PlanResult {
+        TaskRunReportHooks.onModelInput(request)
         val modelRequest = ModelRequest(
             context = request.toModelContext(),
-            systemPrompt = buildSystemPrompt(request.capabilityProfile),
+            systemPrompt = buildSystemPrompt(request),
             userPrompt = buildUserPrompt(request),
             maxResponseChars = maxResponseChars
         )
@@ -38,6 +41,13 @@ class ModelPlanningAdapter(
 
         return when (val response = modelClient.complete(modelRequest)) {
             is ModelResponse.Failure -> {
+                TaskRunReportHooks.onPlanFailure(
+                    sessionId = request.sessionId,
+                    step = request.step,
+                    code = response.code,
+                    details = response.message,
+                    rawResponseText = response.rawResponseSnippet
+                )
                 log(
                     event = "model_request_failed",
                     request = request,
@@ -52,6 +62,11 @@ class ModelPlanningAdapter(
             }
 
             is ModelResponse.Success -> {
+                TaskRunReportHooks.onModelResponse(
+                    sessionId = request.sessionId,
+                    step = request.step,
+                    rawResponseText = response.outputText
+                )
                 val snippet = truncateForLogs(response.outputText, maxResponseChars)
                 log(
                     event = "model_request_success",
@@ -61,6 +76,13 @@ class ModelPlanningAdapter(
                 )
                 when (val parsed = actionParser.parseSingleAction(response.outputText)) {
                     is ParseResult.ParseError -> {
+                        TaskRunReportHooks.onPlanFailure(
+                            sessionId = request.sessionId,
+                            step = request.step,
+                            code = parsed.code,
+                            details = parsed.message,
+                            rawResponseText = response.outputText
+                        )
                         log(
                             event = "model_response_invalid",
                             request = request,
@@ -75,22 +97,66 @@ class ModelPlanningAdapter(
                     }
 
                     is ParseResult.ParseSuccess -> {
-                        when (val validation = capabilityValidator.validate(parsed.action, request.capabilityProfile)) {
+                        when (val phaseValidation = validatePhaseAction(parsed.action, request.controlSnapshot)) {
                             is CapabilityValidationResult.Invalid -> {
+                                TaskRunReportHooks.onPlanFailure(
+                                    sessionId = request.sessionId,
+                                    step = request.step,
+                                    code = phaseValidation.code,
+                                    details = phaseValidation.message,
+                                    rawResponseText = response.outputText
+                                )
                                 log(
-                                    event = "model_output_unsupported_action",
+                                    event = "model_output_phase_blocked",
                                     request = request,
-                                    code = validation.code,
-                                    details = appendSnippet(validation.message, snippet)
+                                    code = phaseValidation.code,
+                                    details = appendSnippet(phaseValidation.message, snippet)
                                 )
                                 PlanResult.PlanFailure(
-                                    code = validation.code,
-                                    message = validation.message,
+                                    code = phaseValidation.code,
+                                    message = phaseValidation.message,
                                     rawResponseSnippet = snippet
                                 )
                             }
 
-                            CapabilityValidationResult.Valid -> PlanResult.PlannedAction(parsed.action)
+                            CapabilityValidationResult.Valid -> when (
+                                val capabilityValidation =
+                                    capabilityValidator.validate(parsed.action, request.capabilityProfile)
+                            ) {
+                                is CapabilityValidationResult.Invalid -> {
+                                    TaskRunReportHooks.onPlanFailure(
+                                        sessionId = request.sessionId,
+                                        step = request.step,
+                                        code = capabilityValidation.code,
+                                        details = capabilityValidation.message,
+                                        rawResponseText = response.outputText
+                                    )
+                                    log(
+                                        event = "model_output_unsupported_action",
+                                        request = request,
+                                        code = capabilityValidation.code,
+                                        details = appendSnippet(capabilityValidation.message, snippet)
+                                    )
+                                    PlanResult.PlanFailure(
+                                        code = capabilityValidation.code,
+                                        message = capabilityValidation.message,
+                                        rawResponseSnippet = snippet
+                                    )
+                                }
+
+                                CapabilityValidationResult.Valid -> {
+                                    val canonicalAction = canonicalActionMapper.map(
+                                        action = parsed.action,
+                                        rawResponseText = response.outputText,
+                                        sourceMode = mode.name
+                                    )
+                                    PlanResult.PlannedAction(
+                                        action = parsed.action,
+                                        canonicalAction = canonicalAction,
+                                        rawResponseText = response.outputText
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -100,69 +166,28 @@ class ModelPlanningAdapter(
 
     override fun clearSession(sessionId: String) = Unit
 
-    private fun buildSystemPrompt(capabilityProfile: CapabilityProfile): String {
+    private fun buildSystemPrompt(request: PlanningRequest): String {
         return buildString {
-            append("You are a single-step Android planner for the current session only. ")
-            append("Return exactly one JSON object and nothing else. ")
-            append("Do not return markdown, arrays, steps containers, multiple objects, or natural language. ")
-            append("Do not use HOME. Do not assume default-display fallback. Do not relaunch apps or guess packages. ")
-            append("Only plan one next action using the current session display. ")
-            append("Capabilities:\n")
-            append(capabilityProfile.summaryText())
+            append("DEBUG_ONLY_ANDROID_SYSTEM_PROMPT ")
+            append("sessionId=").append(request.sessionId)
+            append(" step=").append(request.step)
+            append(" plannerMode=").append(request.planningMode.name)
+            append(" executionDisplayId=").append(request.executionDisplayId)
+            append(" sessionTaskId=").append(request.sessionTaskId)
         }
     }
 
     private fun buildUserPrompt(request: PlanningRequest): String {
-        val observationText = when (val observation = request.observation) {
-            is ObservationResult.Captured -> {
-                "observation_status=captured width=${observation.width} height=${observation.height} " +
-                    "base64_png_chars=${observation.base64Png.length}"
-            }
-
-            is ObservationResult.Failed -> {
-                "observation_status=failed code=${observation.code} message=${observation.message}"
-            }
-        }
-        val actions = if (request.recentActions.isEmpty()) {
-            "none"
-        } else {
-            request.recentActions.joinToString(separator = " | ") {
-                "step=${it.step} action=${it.actionType} code=${it.code} summary=${it.summary}"
-            }
-        }
         return buildString {
-            append("command=")
-            append(request.command)
-            append('\n')
-            append("sessionId=")
-            append(request.sessionId)
-            append('\n')
-            append("executionDisplayId=")
-            append(request.executionDisplayId)
-            append('\n')
-            append("vdDisplayId=")
-            append(request.executionDisplayId)
-            append('\n')
-            append("sessionTaskId=")
-            append(request.sessionTaskId)
-            append('\n')
-            append("step=")
-            append(request.step)
-            append('\n')
-            append(request.capabilityProfile.summaryText())
-            append('\n')
-            append(observationText)
-            append('\n')
-            append("recent_actions=")
-            append(actions)
-            append('\n')
-            append("last_failure_code=")
-            append(request.lastFailureCode ?: "null")
-            append('\n')
-            append("last_user_input=")
-            append(request.lastUserReply ?: "null")
-            append('\n')
-            append("Return exactly one JSON object representing the single next action.")
+            append("DEBUG_ONLY_ANDROID_USER_PROMPT ")
+            append("command=").append(request.command.trim().replace('\n', ' ').take(120))
+            append(" recentActionCount=").append(request.recentActions.size)
+            append(" lastFailureCode=").append(request.lastFailureCode ?: "null")
+            append(" hasLastUserReply=").append(!request.lastUserReply.isNullOrBlank())
+            request.controlSnapshot?.let { snapshot ->
+                append(" phase=").append(snapshot.currentPhase)
+                append(" doneOnly=").append(snapshot.doneOnly)
+            }
         }
     }
 
@@ -198,8 +223,25 @@ class ModelPlanningAdapter(
                 )
             },
             lastFailureCode = lastFailureCode,
-            lastUserReply = lastUserReply
+            lastUserReply = lastUserReply,
+            controlSnapshot = controlSnapshot
         )
+    }
+
+    private fun validatePhaseAction(
+        action: GuiAction,
+        controlSnapshot: AgentControlSnapshot?
+    ): CapabilityValidationResult {
+        val snapshot = controlSnapshot ?: return CapabilityValidationResult.Valid
+        val actionType = action.actionType()
+        return if (snapshot.blockedActions.contains(actionType)) {
+            CapabilityValidationResult.Invalid(
+                code = "MODEL_OUTPUT_PHASE_BLOCKED",
+                message = "action=$actionType is blocked in currentPhase=${snapshot.currentPhase}"
+            )
+        } else {
+            CapabilityValidationResult.Valid
+        }
     }
 
     private fun appendSnippet(message: String, snippet: String?): String {

@@ -1,6 +1,7 @@
 package com.example.agenthost.model
 
 import com.example.agenthost.automation.CapabilityProfile
+import com.example.agenthost.automation.AgentControlSnapshot
 
 data class ModelObservation(
     val status: String,
@@ -29,12 +30,17 @@ data class ModelContext(
     val observation: ModelObservation,
     val recentActions: List<ModelActionHistoryEntry>,
     val lastFailureCode: String?,
-    val lastUserReply: String?
+    val lastUserReply: String?,
+    val controlSnapshot: AgentControlSnapshot? = null
 )
 
 data class ModelRequest(
     val context: ModelContext,
+    // Kept for request compatibility and debugging only. The proxy is the
+    // authority that generates the real upstream prompt.
     val systemPrompt: String,
+    // Kept for request compatibility and debugging only. The proxy is the
+    // authority that generates the real upstream prompt.
     val userPrompt: String,
     val maxResponseChars: Int
 )

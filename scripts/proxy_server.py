@@ -1,19 +1,23 @@
 #!/usr/bin/env python3
 
-"""Local proxy gateway for AgentHost -> GELab-Zero OpenAI-compatible API.
+"""Local proxy gateway for AgentHost -> OpenAI-compatible upstream API.
 
 Usage:
   pip install flask requests
   python3 scripts/proxy_server.py
 
-Environment variables (recommended to override on Windows / LAN setups):
+Environment variables:
   PROXY_HOST=0.0.0.0
   PROXY_PORT=8080
-  UPSTREAM_BASE_URL=http://192.168.58.103:11434
-  UPSTREAM_CHAT_PATH=/v1/chat/completions
-  UPSTREAM_MODEL=gelab-zero-4b-preview
+  UPSTREAM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+  UPSTREAM_CHAT_PATH=/chat/completions
+  UPSTREAM_MODEL=qwen3-vl-plus
   UPSTREAM_TIMEOUT_SECONDS=30
   UPSTREAM_API_KEY=
+  DASHSCOPE_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+  DASHSCOPE_CHAT_PATH=/chat/completions
+  DASHSCOPE_MODEL=qwen3-vl-plus
+  DASHSCOPE_API_KEY=
   PROXY_LOG_BODY_CHARS=400
   PROXY_LOG_BASE64_HEAD_CHARS=32
 """
@@ -93,24 +97,55 @@ def get_env_float(name: str, default: float, minimum: float) -> float:
     return max(value, minimum)
 
 
+def get_first_env(*names: str, default: str) -> str:
+    for name in names:
+        value = os.getenv(name, "").strip()
+        if value:
+            return value
+    return default
+
+
+def get_env_float_alias(names: tuple[str, ...], default: float, minimum: float) -> float:
+    for name in names:
+        raw = os.getenv(name, "").strip()
+        if not raw:
+            continue
+        try:
+            return max(float(raw), minimum)
+        except ValueError:
+            continue
+    return max(default, minimum)
+
+
 def load_settings() -> Settings:
     return Settings(
         proxy_host=os.getenv("PROXY_HOST", "0.0.0.0").strip() or "0.0.0.0",
         proxy_port=get_env_int("PROXY_PORT", 8080, 1),
-        upstream_base_url=(
-            os.getenv("UPSTREAM_BASE_URL", "http://192.168.58.103:11434").strip()
-            or "http://192.168.58.103:11434"
+        upstream_base_url=get_first_env(
+            "UPSTREAM_BASE_URL",
+            "DASHSCOPE_BASE_URL",
+            default="https://dashscope.aliyuncs.com/compatible-mode/v1",
         ),
-        upstream_chat_path=(
-            os.getenv("UPSTREAM_CHAT_PATH", "/v1/chat/completions").strip()
-            or "/v1/chat/completions"
+        upstream_chat_path=get_first_env(
+            "UPSTREAM_CHAT_PATH",
+            "DASHSCOPE_CHAT_PATH",
+            default="/chat/completions",
         ),
-        upstream_model=(
-            os.getenv("UPSTREAM_MODEL", "gelab-zero-4b-preview").strip()
-            or "gelab-zero-4b-preview"
+        upstream_model=get_first_env(
+            "UPSTREAM_MODEL",
+            "DASHSCOPE_MODEL",
+            default="qwen3-vl-plus",
         ),
-        upstream_timeout_seconds=get_env_float("UPSTREAM_TIMEOUT_SECONDS", 30.0, 1.0),
-        upstream_api_key=os.getenv("UPSTREAM_API_KEY", "").strip(),
+        upstream_timeout_seconds=get_env_float_alias(
+            ("UPSTREAM_TIMEOUT_SECONDS", "DASHSCOPE_TIMEOUT_SECONDS"),
+            30.0,
+            1.0,
+        ),
+        upstream_api_key=get_first_env(
+            "UPSTREAM_API_KEY",
+            "DASHSCOPE_API_KEY",
+            default="",
+        ),
         log_body_chars=get_env_int("PROXY_LOG_BODY_CHARS", 400, 64),
         log_base64_head_chars=get_env_int("PROXY_LOG_BASE64_HEAD_CHARS", 32, 0),
     )
@@ -180,6 +215,26 @@ def summarize_capability_profile(capability_profile: Any, max_chars: int) -> dic
     }
 
 
+def summarize_agent_control(agent_control: Any) -> dict[str, Any]:
+    if not isinstance(agent_control, dict):
+        return {"present": False}
+    recent_actions = agent_control.get("recentActions")
+    if not isinstance(recent_actions, list):
+        recent_actions = []
+    last = recent_actions[-1] if recent_actions else None
+    return {
+        "present": True,
+        "currentPhase": agent_control.get("currentPhase"),
+        "allowedActions": agent_control.get("allowedActions") if isinstance(agent_control.get("allowedActions"), list) else [],
+        "blockedActions": agent_control.get("blockedActions") if isinstance(agent_control.get("blockedActions"), list) else [],
+        "lastResult": agent_control.get("lastResult"),
+        "completionState": agent_control.get("completionState"),
+        "doneOnly": bool(agent_control.get("doneOnly")),
+        "recentActionCount": len(recent_actions),
+        "recentLast": truncate_text(compact_json(last), 200) if isinstance(last, dict) else truncate_text(last, 120),
+    }
+
+
 def build_request_summary(payload: Any, base64_head_chars: int) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return {"payloadType": type(payload).__name__}
@@ -190,6 +245,7 @@ def build_request_summary(payload: Any, base64_head_chars: int) -> dict[str, Any
     observation = context.get("observation")
     if not isinstance(observation, dict):
         observation = {}
+    agent_control = context.get("agentControl")
 
     return {
         "sessionId": payload.get("sessionId"),
@@ -214,6 +270,7 @@ def build_request_summary(payload: Any, base64_head_chars: int) -> dict[str, Any
                 ),
             },
             "recentActions": summarize_recent_actions(context.get("recentActions")),
+            "agentControl": summarize_agent_control(agent_control),
             "lastFailureCode": context.get("lastFailureCode"),
             "lastUserReply": truncate_text(context.get("lastUserReply"), 80),
         },
@@ -276,6 +333,11 @@ def build_system_prompt(payload: dict[str, Any]) -> str:
         if isinstance(context.get("capabilityProfile"), dict)
         else {}
     )
+    agent_control = (
+        context.get("agentControl")
+        if isinstance(context.get("agentControl"), dict)
+        else {}
+    )
     allowed_actions, blocked_actions, unknown_actions = build_capability_hint(
         capability_profile
     )
@@ -286,6 +348,7 @@ def build_system_prompt(payload: dict[str, Any]) -> str:
         "Do not output markdown, code fences, explanations, natural language, or extra text.",
         "Do not output arrays, multiple actions, or actions/steps containers.",
         "The JSON object must be directly parseable by a strict Android single-action parser.",
+        "For CLICK, LONG_PRESS, and SWIPE, output coordinates in thousandths of the screenshot size (0-1000), not absolute pixels.",
         "Supported action names in this protocol are: CLICK, LONG_PRESS, SWIPE, TYPE_TEXT, BACK, HOME, WAIT, ASK_USER, DONE.",
         "Use the current screenshot as the main source of truth.",
         "If the requested destination, page, toggle, or list item is already open or clearly visible, return DONE immediately.",
@@ -298,10 +361,29 @@ def build_system_prompt(payload: dict[str, Any]) -> str:
         f"Capability summary: {context.get('capabilitySummary') or 'n/a'}",
         f"Capability profile JSON: {compact_json(capability_profile) if capability_profile else '{}'}",
         'Example valid output: {"action":"CLICK","x":500,"y":500}',
+        'Example valid output: {"action":"SWIPE","x1":500,"y1":800,"x2":500,"y2":300,"durationMs":400}',
         'Example valid output: {"action":"TYPE_TEXT","text":"hello123"}',
         'Example valid output: {"action":"ASK_USER","question":"Please provide the verification code."}',
         'Example valid output: {"action":"DONE","reason":"task_complete"}',
     ]
+
+    control_phase = str(agent_control.get("currentPhase") or "").strip()
+    if control_phase:
+        lines.append(f"Current control phase: {control_phase}.")
+    control_allowed = agent_control.get("allowedActions")
+    if isinstance(control_allowed, list) and control_allowed:
+        lines.append(f"System-allowed actions now: {', '.join(str(item) for item in control_allowed)}.")
+    control_blocked = agent_control.get("blockedActions")
+    if isinstance(control_blocked, list) and control_blocked:
+        lines.append(f"System-blocked actions now: {', '.join(str(item) for item in control_blocked)}.")
+    if agent_control.get("doneOnly") is True:
+        lines.append("The system has already marked the target as completed. Only return DONE or ASK_USER.")
+    elif control_phase == "NEED_OPEN_PARENT":
+        lines.append("Focus on opening the parent destination first. Avoid exploratory backtracking.")
+    elif control_phase == "NEED_CLICK_TARGET":
+        lines.append("Focus on clicking the target item once or scrolling to find it. Avoid BACK and HOME.")
+    elif control_phase == "TARGET_CLICKED_PENDING_SETTLE":
+        lines.append("The target may already be complete. Prefer DONE, ASK_USER, or WAIT. Do not keep clicking.")
 
     text_level = str(capability_profile.get("textSupportLevel") or "").strip().upper()
     if text_level == "ASCII_BASIC":
@@ -314,13 +396,6 @@ def build_system_prompt(payload: dict[str, Any]) -> str:
         lines.append(
             "If non-ASCII text would be needed, choose another allowed action instead of TYPE_TEXT."
         )
-
-    android_system_prompt = str(payload.get("systemPrompt") or "").strip()
-    android_user_prompt = str(payload.get("userPrompt") or "").strip()
-    if android_system_prompt:
-        lines.append(f"Android systemPrompt: {android_system_prompt}")
-    if android_user_prompt:
-        lines.append(f"Android userPrompt: {android_user_prompt}")
 
     last_failure_code = context.get("lastFailureCode")
     if last_failure_code:
@@ -338,6 +413,9 @@ def build_user_text(payload: dict[str, Any]) -> str:
         context.get("observation") if isinstance(context.get("observation"), dict) else {}
     )
     recent_actions = context.get("recentActions") if isinstance(context.get("recentActions"), list) else []
+    agent_control = (
+        context.get("agentControl") if isinstance(context.get("agentControl"), dict) else {}
+    )
 
     lines = [
         f"User command: {context.get('command') or payload.get('userPrompt') or ''}",
@@ -355,10 +433,24 @@ def build_user_text(payload: dict[str, Any]) -> str:
         lines.append(f"Observation code: {observation.get('code')}")
     if observation.get("message"):
         lines.append(f"Observation message: {observation.get('message')}")
-    if context.get("lastFailureCode"):
-        lines.append(f"Last failure code: {context.get('lastFailureCode')}")
-    if context.get("lastUserReply"):
-        lines.append(f"Last user reply: {context.get('lastUserReply')}")
+    if agent_control.get("currentPhase"):
+        lines.append(f"Current phase: {agent_control.get('currentPhase')}")
+    if agent_control.get("parentHint"):
+        lines.append(f"Parent hint: {agent_control.get('parentHint')}")
+    if agent_control.get("targetHint"):
+        lines.append(f"Target hint: {agent_control.get('targetHint')}")
+    if agent_control.get("lastResult"):
+        lines.append(f"Last result: {agent_control.get('lastResult')}")
+    if agent_control.get("completionState"):
+        lines.append(f"Completion state: {agent_control.get('completionState')}")
+    allowed_actions = agent_control.get("allowedActions")
+    if isinstance(allowed_actions, list) and allowed_actions:
+        lines.append(f"Allowed actions now: {', '.join(str(item) for item in allowed_actions)}")
+    blocked_actions = agent_control.get("blockedActions")
+    if isinstance(blocked_actions, list) and blocked_actions:
+        lines.append(f"Blocked actions now: {', '.join(str(item) for item in blocked_actions)}")
+    if agent_control.get("doneOnly") is True:
+        lines.append("DONE_ONLY is active: do not continue clicking or swiping.")
 
     if recent_actions:
         lines.append(f"Recent action count: {len(recent_actions)}")
@@ -370,6 +462,27 @@ def build_user_text(payload: dict[str, Any]) -> str:
                 f"step={action.get('step')} type={action.get('actionType')} "
                 f"code={action.get('code')} summary={action.get('summary')}"
             )
+
+    control_recent_actions = agent_control.get("recentActions")
+    if isinstance(control_recent_actions, list) and control_recent_actions:
+        lines.append(f"Recent control action count: {len(control_recent_actions)}")
+        for action in control_recent_actions[-4:]:
+            if not isinstance(action, dict):
+                continue
+            point = action.get("approxPoint")
+            point_summary = ""
+            if isinstance(point, dict):
+                point_summary = f" point=({point.get('x')},{point.get('y')})"
+            lines.append(
+                "Recent control action: "
+                f"step={action.get('step')} type={action.get('actionType')} "
+                f"result={action.get('resultCategory')} phase={action.get('phaseAfter')}{point_summary} "
+                f"summary={action.get('summary')}"
+            )
+    if context.get("lastFailureCode"):
+        lines.append(f"Last failure code: {context.get('lastFailureCode')}")
+    if context.get("lastUserReply"):
+        lines.append(f"Last user reply: {context.get('lastUserReply')}")
 
     lines.append(
         "Choose the single best next action based on the screenshot and capabilities."
@@ -482,6 +595,18 @@ def extract_text_from_upstream_json(data: dict[str, Any]) -> str | None:
     return None
 
 
+def extract_error_from_upstream_json(data: Any) -> tuple[str, str, str | None] | None:
+    if not isinstance(data, dict):
+        return None
+    error = data.get("error")
+    if not isinstance(error, dict):
+        return None
+    code = str(error.get("code") or "MODEL_UNAVAILABLE")
+    message = str(error.get("message") or error.get("type") or "upstream returned non-success status")
+    details = str(error.get("type")).strip() if error.get("type") is not None else None
+    return code, message, details or None
+
+
 def strip_markdown_fences(text: str) -> str:
     stripped = re.sub(r"```(?:json)?", "", text, flags=re.IGNORECASE)
     return stripped.strip()
@@ -570,12 +695,207 @@ def extract_legacy_action_object(text: str) -> str | None:
     return None
 
 
-def sanitize_model_output(raw_text: str) -> str | None:
+def extract_repaired_action_object(text: str) -> str | None:
+    click_missing_y = re.search(
+        r'\{\s*"action"\s*:\s*"CLICK"\s*,\s*"x"\s*:\s*(-?\d+)\s*,\s*(-?\d+)\s*\}',
+        text,
+        flags=re.IGNORECASE,
+    )
+    if click_missing_y:
+        return compact_json(
+            {
+                "action": "CLICK",
+                "x": int(click_missing_y.group(1)),
+                "y": int(click_missing_y.group(2)),
+            }
+        )
+    return None
+
+
+def parse_positive_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, float):
+        integer = int(value)
+        return integer if value == integer and integer > 0 else None
+    return None
+
+
+def parse_numeric_coordinate(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
+def scale_thousandth_coordinate(value: Any, size: int) -> int | None:
+    numeric = parse_numeric_coordinate(value)
+    if numeric is None or size <= 0:
+        return None
+    scaled = round((numeric * size) / 1000.0)
+    return max(0, min(int(scaled), size - 1))
+
+
+def normalize_action_coordinates(
+    action_object: dict[str, Any], observation: dict[str, Any] | None
+) -> dict[str, Any]:
+    if not isinstance(observation, dict):
+        return action_object
+    width = parse_positive_int(observation.get("width"))
+    height = parse_positive_int(observation.get("height"))
+    if width is None or height is None:
+        return action_object
+
+    action_name = str(action_object.get("action") or "").strip().upper()
+    normalized = dict(action_object)
+
+    if action_name in {"CLICK", "LONG_PRESS"}:
+        scaled_x = scale_thousandth_coordinate(normalized.get("x"), width)
+        scaled_y = scale_thousandth_coordinate(normalized.get("y"), height)
+        if scaled_x is not None and scaled_y is not None:
+            normalized["x"] = scaled_x
+            normalized["y"] = scaled_y
+        return normalized
+
+    if action_name == "SWIPE":
+        scaled_x1 = scale_thousandth_coordinate(normalized.get("x1"), width)
+        scaled_y1 = scale_thousandth_coordinate(normalized.get("y1"), height)
+        scaled_x2 = scale_thousandth_coordinate(normalized.get("x2"), width)
+        scaled_y2 = scale_thousandth_coordinate(normalized.get("y2"), height)
+        if None not in (scaled_x1, scaled_y1, scaled_x2, scaled_y2):
+            normalized["x1"] = scaled_x1
+            normalized["y1"] = scaled_y1
+            normalized["x2"] = scaled_x2
+            normalized["y2"] = scaled_y2
+        return normalized
+
+    return normalized
+
+
+def normalize_sanitized_action(
+    json_object: str,
+    observation: dict[str, Any] | None,
+    *,
+    raw_model_action: str | None,
+    source_model: str,
+    source_mode: str,
+) -> str:
+    try:
+        parsed = json.loads(json_object)
+    except json.JSONDecodeError:
+        return json_object
+    if not isinstance(parsed, dict):
+        return json_object
+    normalized = normalize_action_coordinates(parsed, observation)
+    action_name = str(normalized.get("action") or "").strip().upper()
+    coord_space = "NONE"
+    if action_name in {"CLICK", "LONG_PRESS", "SWIPE"}:
+        coord_space = "IMAGE_PIXEL"
+    existing_meta = normalized.get("_meta")
+    meta = dict(existing_meta) if isinstance(existing_meta, dict) else {}
+    meta.update(
+        {
+            "coordSpace": coord_space,
+            "sourceModel": source_model,
+            "sourceMode": source_mode,
+            "rawModelAction": raw_model_action or json_object,
+        }
+    )
+    normalized["_meta"] = meta
+    return compact_json(normalized)
+
+
+def sanitize_model_output(
+    raw_text: str,
+    observation: dict[str, Any] | None = None,
+    *,
+    source_model: str,
+    source_mode: str,
+) -> str | None:
     cleaned = strip_markdown_fences(raw_text)
     json_object = extract_first_json_object(cleaned)
     if json_object:
-        return json_object
-    return extract_legacy_action_object(cleaned)
+        return normalize_sanitized_action(
+            json_object,
+            observation,
+            raw_model_action=raw_text,
+            source_model=source_model,
+            source_mode=source_mode,
+        )
+    repaired_object = extract_repaired_action_object(cleaned)
+    if repaired_object:
+        return normalize_sanitized_action(
+            repaired_object,
+            observation,
+            raw_model_action=raw_text,
+            source_model=source_model,
+            source_mode=source_mode,
+        )
+    legacy_object = extract_legacy_action_object(cleaned)
+    if legacy_object:
+        return normalize_sanitized_action(
+            legacy_object,
+            observation,
+            raw_model_action=raw_text,
+            source_model=source_model,
+            source_mode=source_mode,
+        )
+    return None
+
+
+class UpstreamAdapter:
+    name = "base"
+
+    def build_upstream_request(self, payload: dict[str, Any], settings: Settings) -> dict[str, Any]:
+        raise NotImplementedError
+
+    def build_upstream_request_summary(
+        self, upstream_payload: dict[str, Any], settings: Settings
+    ) -> dict[str, Any]:
+        raise NotImplementedError
+
+    def extract_model_text(self, upstream_json: dict[str, Any]) -> str | None:
+        raise NotImplementedError
+
+    def sanitize_output(
+        self, model_text: str, payload: dict[str, Any], settings: Settings
+    ) -> str | None:
+        raise NotImplementedError
+
+
+class OpenAiCompatibleAdapter(UpstreamAdapter):
+    name = "openai_compatible"
+
+    def build_upstream_request(self, payload: dict[str, Any], settings: Settings) -> dict[str, Any]:
+        return build_upstream_request(payload, settings)
+
+    def build_upstream_request_summary(
+        self, upstream_payload: dict[str, Any], settings: Settings
+    ) -> dict[str, Any]:
+        return build_upstream_request_summary(upstream_payload, settings)
+
+    def extract_model_text(self, upstream_json: dict[str, Any]) -> str | None:
+        return extract_text_from_upstream_json(upstream_json)
+
+    def sanitize_output(
+        self, model_text: str, payload: dict[str, Any], settings: Settings
+    ) -> str | None:
+        context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
+        observation = (
+            context.get("observation") if isinstance(context.get("observation"), dict) else {}
+        )
+        return sanitize_model_output(
+            model_text,
+            observation,
+            source_model=settings.upstream_model,
+            source_mode=self.name,
+        )
+
+
+PLANNER_ADAPTER: UpstreamAdapter = OpenAiCompatibleAdapter()
 
 
 def build_error_response(
@@ -627,6 +947,7 @@ def post_to_upstream(upstream_payload: dict[str, Any], settings: Settings) -> re
 def healthz():
     summary = {
         "ok": True,
+        "adapter": PLANNER_ADAPTER.name,
         "proxyHost": SETTINGS.proxy_host,
         "proxyPort": SETTINGS.proxy_port,
         "upstreamBaseUrl": SETTINGS.upstream_base_url,
@@ -651,8 +972,8 @@ def plan():
     request_summary = build_request_summary(payload, SETTINGS.log_base64_head_chars)
     log_line(f"request summary {compact_json(request_summary)}")
 
-    upstream_payload = build_upstream_request(payload, SETTINGS)
-    upstream_summary = build_upstream_request_summary(upstream_payload, SETTINGS)
+    upstream_payload = PLANNER_ADAPTER.build_upstream_request(payload, SETTINGS)
+    upstream_summary = PLANNER_ADAPTER.build_upstream_request_summary(upstream_payload, SETTINGS)
     log_line(f"upstream request summary {compact_json(upstream_summary)}")
 
     try:
@@ -691,22 +1012,31 @@ def plan():
         f"status={upstream_response.status_code} raw={truncate_text(raw_upstream_text, SETTINGS.log_body_chars)}"
     )
 
-    if not upstream_response.ok:
-        return build_error_response(
-            status=HTTPStatus.BAD_GATEWAY,
-            code="MODEL_UNAVAILABLE",
-            message="upstream returned non-success status",
-            upstream_status=upstream_response.status_code,
-            raw_response_snippet=truncate_text(raw_upstream_text, SETTINGS.log_body_chars),
-        )
-
+    upstream_json: dict[str, Any] | None = None
     try:
-        upstream_json = upstream_response.json()
+        parsed_json = upstream_response.json()
     except json.JSONDecodeError:
+        parsed_json = None
+
+    if parsed_json is not None and isinstance(parsed_json, dict):
+        upstream_json = parsed_json
+    elif upstream_response.ok:
         return build_error_response(
             status=HTTPStatus.BAD_GATEWAY,
             code="MODEL_UNAVAILABLE",
             message="upstream response was not valid JSON",
+            raw_response_snippet=truncate_text(raw_upstream_text, SETTINGS.log_body_chars),
+        )
+
+    upstream_error = extract_error_from_upstream_json(upstream_json)
+
+    if not upstream_response.ok:
+        return build_error_response(
+            status=HTTPStatus.BAD_GATEWAY,
+            code=upstream_error[0] if upstream_error else "MODEL_UNAVAILABLE",
+            message=upstream_error[1] if upstream_error else "upstream returned non-success status",
+            details=upstream_error[2] if upstream_error else None,
+            upstream_status=upstream_response.status_code,
             raw_response_snippet=truncate_text(raw_upstream_text, SETTINGS.log_body_chars),
         )
 
@@ -718,14 +1048,14 @@ def plan():
             raw_response_snippet=truncate_text(raw_upstream_text, SETTINGS.log_body_chars),
         )
 
-    model_text = extract_text_from_upstream_json(upstream_json)
+    model_text = PLANNER_ADAPTER.extract_model_text(upstream_json)
     if not model_text:
         return build_no_json_response(raw_upstream_text, upstream_response.status_code)
 
     log_line(
         f"upstream model text {truncate_text(model_text, SETTINGS.log_body_chars)}"
     )
-    sanitized = sanitize_model_output(model_text)
+    sanitized = PLANNER_ADAPTER.sanitize_output(model_text, payload, SETTINGS)
     if not sanitized:
         return build_no_json_response(model_text, upstream_response.status_code)
 
@@ -735,6 +1065,7 @@ def plan():
 
 def main() -> int:
     config_summary = {
+        "adapter": PLANNER_ADAPTER.name,
         "proxyHost": SETTINGS.proxy_host,
         "proxyPort": SETTINGS.proxy_port,
         "upstreamBaseUrl": SETTINGS.upstream_base_url,
