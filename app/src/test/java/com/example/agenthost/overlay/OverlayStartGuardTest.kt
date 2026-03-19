@@ -61,6 +61,29 @@ class OverlayStartGuardTest {
         assertEquals(0, gateway.stopCalls)
     }
 
+    @Test
+    fun missingTaskCleanupLogUsesSharedOverlayMapperOutput() {
+        val gateway = FakeGateway(
+            activeSession = baseSession(
+                status = SessionStatus.WAITING_USER,
+                recoveryNeeded = true,
+                lastMigrationCode = "TARGET_TASK_NOT_FOUND"
+            ),
+            cleanupResult = SessionResult(ok = true, code = "CLOSED")
+        )
+        val logs = mutableListOf<String>()
+        val guard = OverlayStartGuard(
+            sessionGateway = gateway,
+            logger = { logs += it },
+            startTask = { SessionResult(ok = true, code = "SESSION_STARTED") },
+            overlayModeLabel = { "MAPPER_MODE" }
+        )
+
+        guard.start("打开设置")
+
+        assertTrue(logs.single().contains("overlayUiState=MAPPER_MODE"))
+    }
+
     private fun baseSession(
         status: SessionStatus,
         recoveryNeeded: Boolean,

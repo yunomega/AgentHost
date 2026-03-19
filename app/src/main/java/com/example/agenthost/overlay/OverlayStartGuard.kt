@@ -7,7 +7,8 @@ import com.example.agenthost.session.SessionState
 internal class OverlayStartGuard(
     private val sessionGateway: OverlaySessionGateway,
     private val logger: (String) -> Unit = {},
-    private val startTask: (String) -> SessionResult
+    private val startTask: (String) -> SessionResult,
+    private val overlayModeLabel: (SessionState?) -> String = OverlayStateMapper()::modeName
 ) {
     fun start(command: String): SessionResult {
         val activeSession = sessionGateway.getActiveSession()
@@ -22,7 +23,7 @@ internal class OverlayStartGuard(
                     sessionId = activeSession.sessionId,
                     activeSession = activeSession,
                     session = activeSession,
-                    overlayUiState = OverlayMode.RECOVERY.name,
+                    overlayUiState = overlayModeLabel(activeSession),
                     extras = "source=start_guard lastMigrationCode=${activeSession.lastMigrationCode ?: "null"}"
                 )
             )

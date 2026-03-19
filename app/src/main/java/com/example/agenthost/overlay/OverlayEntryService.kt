@@ -32,7 +32,10 @@ class OverlayEntryService : Service() {
     private lateinit var overlayController: OverlayController
     private lateinit var actionDispatcher: OverlayActionDispatcher
     private lateinit var presencePrefs: OverlayPresencePrefs
+    private val overlayStateMapper = OverlayStateMapper()
     private var foregroundStarted = false
+    // Diff cache only. This snapshot exists to suppress redundant renders and is
+    // not a canonical session snapshot or a source of business semantics.
     private var lastRenderedSessionSnapshot: SessionStateListenerSnapshot? = null
     private val sessionStateListener = SessionStateListener { session ->
         mainHandler.post { renderOverlayIfChanged(session) }
@@ -72,7 +75,7 @@ class OverlayEntryService : Service() {
         )
         overlayController = OverlayController(
             context = applicationContext,
-            stateMapper = OverlayStateMapper(),
+            stateMapper = overlayStateMapper,
             actionDispatcher = actionDispatcher
         )
         sessionCoordinator().addSessionStateListener(sessionStateListener)
@@ -216,7 +219,8 @@ class OverlayEntryService : Service() {
         val result = OverlayStartGuard(
             sessionGateway = sessionCoordinator(),
             logger = { message -> Log.i(TAG, message) },
-            startTask = ::startWithAutomation
+            startTask = ::startWithAutomation,
+            overlayModeLabel = overlayStateMapper::modeName
         ).start(trimmed)
         if (!result.ok && result.code == "SESSION_ALREADY_ACTIVE") {
             Log.i(

@@ -14,6 +14,9 @@ internal enum class RecoveryPrimaryRoute {
 }
 
 internal object OverlayRecoverySupport {
+    // Recovery routing is UI/controller-local derived state. It may read canonical
+    // session fields and migration result codes only, never retained UI state or
+    // report diagnostics.
     fun isAlreadyOnMain(session: SessionState): Boolean {
         return session.displayMode == SessionDisplayMode.MAIN_DISPLAY ||
             session.migratedToMain ||

@@ -82,6 +82,8 @@ class OverlayController(
     private var anchorSide = AnchorSide.END
     private var currentSession: SessionState? = null
     private var currentUiState: OverlayUiState = stateMapper.map(null)
+    // These fields are controller-local retained UI state. They intentionally do
+    // not participate in canonical session state or shared classification helpers.
     private val postCompletionRetention = OverlayPostCompletionRetention(
         nowMs = { SystemClock.elapsedRealtime() }
     )
@@ -369,13 +371,14 @@ class OverlayController(
             }
 
             OverlayMode.RECOVERY -> {
-                if (currentUiState.alreadyOnMain &&
-                    !session.migratedToMain &&
-                    !OverlayRecoverySupport.shouldFallbackToIdle(session)
-                ) {
-                    isExpanded = false
-                } else {
-                    actionDispatcher.requestRecoveryPrimary(session.sessionId, currentUiState)
+                when (OverlayRecoverySupport.primaryRoute(session)) {
+                    RecoveryPrimaryRoute.NONE -> {
+                        isExpanded = false
+                    }
+
+                    else -> {
+                        actionDispatcher.requestRecoveryPrimary(session.sessionId, currentUiState)
+                    }
                 }
             }
 
