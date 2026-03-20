@@ -25,6 +25,44 @@ class ObservationChangeDetectorTest {
         assertFalse(ObservationChangeDetector.hasMeaningfulVisualChange(before, after))
     }
 
+    @Test
+    fun localRoiChangeNearClickPointCanConfirmSmallToggleChange() {
+        val before = frame(width = 60, height = 100) { _, _ -> 240 }
+        val after = frame(width = 60, height = 100) { x, y ->
+            if (x in 48..55 && y in 24..33) 120 else 240
+        }
+
+        val result = ObservationChangeDetector.detectLocalRoiChangeOnFrames(
+            before = before,
+            after = after,
+            point = CanonicalPoint(960, 570),
+            sourceWidth = 1080,
+            sourceHeight = 1920,
+            radiusPx = 72
+        )
+
+        assertTrue(result.confirmed)
+    }
+
+    @Test
+    fun localRoiChangeIgnoresTinyNoiseNearClickPoint() {
+        val before = frame(width = 60, height = 100) { _, _ -> 240 }
+        val after = frame(width = 60, height = 100) { x, y ->
+            if ((x == 53 && y == 29) || (x == 54 && y == 30)) 235 else 240
+        }
+
+        val result = ObservationChangeDetector.detectLocalRoiChangeOnFrames(
+            before = before,
+            after = after,
+            point = CanonicalPoint(960, 570),
+            sourceWidth = 1080,
+            sourceHeight = 1920,
+            radiusPx = 72
+        )
+
+        assertFalse(result.confirmed)
+    }
+
     private fun frame(
         width: Int,
         height: Int,
@@ -44,4 +82,5 @@ class ObservationChangeDetectorTest {
             pixels = pixels
         )
     }
+
 }

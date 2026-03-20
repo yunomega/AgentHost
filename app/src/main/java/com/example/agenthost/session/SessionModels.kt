@@ -33,6 +33,11 @@ enum class PostCompletionState {
     FALLBACK_CLEANUP
 }
 
+enum class WaitingUserDisposition {
+    STANDARD_HANDOFF,
+    COMPLETION_CONFIRMATION
+}
+
 data class SessionStartOptions(
     val displayMode: SessionDisplayMode = SessionDisplayMode.AUTO,
     val visibleToUser: Boolean = false,
@@ -65,6 +70,7 @@ data class SessionState(
     val status: SessionStatus,
     val lastError: String?,
     val waitingQuestion: String?,
+    val waitingUserDisposition: WaitingUserDisposition = WaitingUserDisposition.STANDARD_HANDOFF,
     val automationStep: Int,
     val displayMode: SessionDisplayMode,
     val visibleToUser: Boolean,

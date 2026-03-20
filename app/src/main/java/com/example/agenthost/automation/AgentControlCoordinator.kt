@@ -25,7 +25,8 @@ data class ControlPostActionResolution(
     val requestSessionComplete: Boolean,
     val completionReason: String?,
     val requestUserHandoff: Boolean,
-    val handoffQuestion: String?
+    val handoffQuestion: String?,
+    val completionConfirmationPending: Boolean
 )
 
 class AgentControlCoordinator(
@@ -109,12 +110,17 @@ class AgentControlCoordinator(
         resolution: ControlActionResolution,
         executionResult: ActionExecutionResult?,
         controlSyntheticCode: String?,
-        controlSyntheticDetails: String?
+        controlSyntheticDetails: String?,
+        localChangeConfirmedPoint: CanonicalPoint? = null
     ): ControlPostActionResolution {
         val state = states.computeIfAbsent(sessionId) {
             GuardrailState(subgoalState = subgoalStateMachine.initialState(command))
         }
-        val observationChanged = detectObservationChange(beforeObservation, afterObservation)
+        val observationChanged = if (localChangeConfirmedPoint != null) {
+            true
+        } else {
+            detectObservationChange(beforeObservation, afterObservation)
+        }
         val modelRequestedDone = resolution.proposedAction.type == CanonicalActionType.DONE
         val candidatePhase = subgoalStateMachine.advancePhase(
             state = state.subgoalState,
@@ -146,7 +152,8 @@ class AgentControlCoordinator(
             controlSyntheticDetails = controlSyntheticDetails,
             observationChanged = observationChanged,
             completionVerdict = completionVerdict,
-            state = state
+            state = state,
+            localChangeConfirmedPoint = localChangeConfirmedPoint
         )
         val requiresDoneConfirmation = resolution.finalCanonicalAction.type == CanonicalActionType.DONE &&
             beforeObservation is ObservationResult.Captured &&
@@ -161,7 +168,8 @@ class AgentControlCoordinator(
             observationChanged = observationChanged,
             nextPhase = nextPhase,
             afterObservation = afterObservation,
-            guardrailRule = resolution.guardrailDecision.rule
+            guardrailRule = resolution.guardrailDecision.rule,
+            localChangeConfirmedPoint = localChangeConfirmedPoint
         )
         states[sessionId] = updated
         return ControlPostActionResolution(
@@ -187,7 +195,8 @@ class AgentControlCoordinator(
                 }
             } else {
                 null
-            }
+            },
+            completionConfirmationPending = requiresDoneConfirmation
         )
     }
 
@@ -198,7 +207,8 @@ class AgentControlCoordinator(
         controlSyntheticDetails: String?,
         observationChanged: Boolean?,
         completionVerdict: CompletionVerdict,
-        state: GuardrailState
+        state: GuardrailState,
+        localChangeConfirmedPoint: CanonicalPoint?
     ): StepResultSummary {
         if (resolution.guardrailDecision.wasBlocked()) {
             return StepResultSummary(
@@ -229,6 +239,14 @@ class AgentControlCoordinator(
                     code = it.code,
                     message = it.details,
                     observationChanged = observationChanged
+                )
+            }
+            if (localChangeConfirmedPoint != null) {
+                return StepResultSummary(
+                    category = StepResultCategory.SUCCESS_CHANGED,
+                    code = "LOCAL_ROI_CHANGE_CONFIRMED",
+                    message = it.details,
+                    observationChanged = true
                 )
             }
             return if (observationChanged == false) {
@@ -290,7 +308,8 @@ class AgentControlCoordinator(
         observationChanged: Boolean?,
         nextPhase: SubgoalState,
         afterObservation: ObservationResult?,
-        guardrailRule: String?
+        guardrailRule: String?,
+        localChangeConfirmedPoint: CanonicalPoint?
     ): GuardrailState {
         val progress = observationChanged == true ||
             resultSummary.category == StepResultCategory.COMPLETION_SATISFIED ||
@@ -332,6 +351,29 @@ class AgentControlCoordinator(
         } else {
             previous.lastClickPoint
         }
+        val inferredToggleLikeClickPoint = when {
+            localChangeConfirmedPoint != null -> localChangeConfirmedPoint
+            finalAction.type == CanonicalActionType.CLICK &&
+                finalAction.point != null &&
+                observationChanged == true &&
+                previous.subgoalState.phase == nextPhase.phase ->
+                finalAction.point
+
+            guardrailRule == "TOGGLE_REPEAT_CLICK_SUPPRESSED" ->
+                previous.lastLocallyConfirmedClickPoint
+
+            else -> null
+        }
+        val nextLocallyConfirmedClickPoint = when {
+            inferredToggleLikeClickPoint != null -> inferredToggleLikeClickPoint
+            progress -> null
+            else -> previous.lastLocallyConfirmedClickPoint
+        }
+        val nextLocallyConfirmedClickStep = when {
+            inferredToggleLikeClickPoint != null -> step
+            progress -> null
+            else -> previous.lastLocallyConfirmedClickStep
+        }
         val record = ControlStepRecord(
             step = step,
             proposedActionType = resolution.proposedAction.actionType(),
@@ -356,6 +398,8 @@ class AgentControlCoordinator(
             consecutiveBackHomeBlocks = nextBackHomeBlocks,
             lastClickPoint = nextPoint,
             nearbyRepeatClickCount = nextClickRepeat,
+            lastLocallyConfirmedClickPoint = nextLocallyConfirmedClickPoint,
+            lastLocallyConfirmedClickStep = nextLocallyConfirmedClickStep,
             completionVerdict = if (nextPhase.phase == SubgoalPhase.DONE_ONLY) {
                 CompletionVerdict.SATISFIED
             } else {

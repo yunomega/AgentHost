@@ -22,6 +22,7 @@ import com.example.agenthost.overlay.view.HandoffStripView
 import com.example.agenthost.overlay.view.NewTaskInputView
 import com.example.agenthost.overlay.view.NeedUserCardView
 import com.example.agenthost.session.SessionState
+import com.example.agenthost.session.WaitingUserDisposition
 
 class OverlayController(
     context: Context,
@@ -190,8 +191,11 @@ class OverlayController(
             !showPromptPanel &&
             mapped.newTaskEntryState != NewTaskEntryState.HIDDEN
         val showHandoffStrip = showPromptPanel &&
-            mapped.mode == OverlayMode.HANDOFF_ACTIVE &&
-            acknowledgedHandoffSessionId == mapped.sessionId
+            mapped.requiresReplyInput &&
+            (
+                acknowledgedHandoffSessionId == mapped.sessionId ||
+                    isCompletionConfirmationPending(session)
+            )
         val showNeedUserPanel = showPromptPanel && !showHandoffStrip &&
             mapped.mode in setOf(
                 OverlayMode.NEED_USER,
@@ -222,12 +226,21 @@ class OverlayController(
             needUserCardView.visibility = View.GONE
         }
         if (showHandoffStrip) {
+            val completionConfirmation = isCompletionConfirmationPending(session)
             handoffStripView.bind(
-                title = "处理完成后返回后台执行",
+                title = if (completionConfirmation) {
+                    mapped.title ?: "继续后台执行"
+                } else {
+                    "处理完成后返回后台执行"
+                },
                 message = mapped.message.orEmpty(),
                 replyText = replyDraft.ifBlank { mapped.defaultReplyText },
-                primaryLabel = "提交并返回后台",
-                secondaryLabel = "取消任务"
+                primaryLabel = if (completionConfirmation) "提交并继续后台" else "提交并返回后台",
+                secondaryLabel = if (completionConfirmation) {
+                    mapped.secondaryLabel ?: "稍后"
+                } else {
+                    "取消任务"
+                }
             )
             handoffStripView.visibility = View.VISIBLE
         } else {
@@ -354,7 +367,14 @@ class OverlayController(
         val session = currentSession ?: return
         when (currentUiState.mode) {
             OverlayMode.NEED_USER -> {
-                if (currentUiState.alreadyOnMain) {
+                if (isCompletionConfirmationPending(session)) {
+                    acknowledgedHandoffSessionId = session.sessionId
+                    if (replyDraftSessionId != session.sessionId) {
+                        replyDraftSessionId = session.sessionId
+                        replyDraft = currentUiState.defaultReplyText
+                    }
+                    isExpanded = true
+                } else if (currentUiState.alreadyOnMain) {
                     isExpanded = false
                 } else {
                     actionDispatcher.requestMoveToMain(session.sessionId, currentUiState)
@@ -407,6 +427,17 @@ class OverlayController(
     private fun handleNeedUserSecondary() {
         if (currentUiState.mode == OverlayMode.POST_COMPLETION) {
             dismissPostCompletion()
+        } else if (currentUiState.mode == OverlayMode.NEED_USER &&
+            isCompletionConfirmationPending(currentSession)
+        ) {
+            val session = currentSession ?: return
+            if (currentUiState.alreadyOnMain) {
+                snoozedSessionId = currentUiState.sessionId
+                isExpanded = false
+                render(currentSession)
+            } else {
+                actionDispatcher.requestReturnToMain(session.sessionId, currentUiState)
+            }
         } else if (currentUiState.mode == OverlayMode.RECOVERY) {
             actionDispatcher.cancelSession(currentSession?.sessionId, currentUiState)
         } else {
@@ -434,7 +465,22 @@ class OverlayController(
     }
 
     private fun handleHandoffSecondary() {
-        actionDispatcher.cancelSession(currentSession?.sessionId, currentUiState)
+        if (isCompletionConfirmationPending(currentSession)) {
+            val session = currentSession ?: return
+            if (currentUiState.alreadyOnMain) {
+                snoozedSessionId = currentUiState.sessionId
+                isExpanded = false
+                render(currentSession)
+            } else {
+                actionDispatcher.requestReturnToMain(session.sessionId, currentUiState)
+            }
+        } else {
+            actionDispatcher.cancelSession(currentSession?.sessionId, currentUiState)
+        }
+    }
+
+    private fun isCompletionConfirmationPending(session: SessionState?): Boolean {
+        return session?.waitingUserDisposition == WaitingUserDisposition.COMPLETION_CONFIRMATION
     }
 
     private fun shouldShowPromptPanel(state: OverlayUiState): Boolean {

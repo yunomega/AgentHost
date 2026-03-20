@@ -14,14 +14,17 @@ Environment variables:
   UPSTREAM_MODEL=glm-4.6v
   UPSTREAM_TIMEOUT_SECONDS=30
   UPSTREAM_API_KEY=
+  UPSTREAM_STRICT_JSON_SCHEMA=true
   BIGMODEL_BASE_URL=https://open.bigmodel.cn/api/paas/v4
   BIGMODEL_CHAT_PATH=/chat/completions
   BIGMODEL_MODEL=glm-4.6v
   BIGMODEL_API_KEY=
+  BIGMODEL_STRICT_JSON_SCHEMA=true
   DASHSCOPE_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
   DASHSCOPE_CHAT_PATH=/chat/completions
   DASHSCOPE_MODEL=qwen3-vl-plus
   DASHSCOPE_API_KEY=
+  DASHSCOPE_STRICT_JSON_SCHEMA=true
   PROXY_LOG_BODY_CHARS=400
   PROXY_LOG_BASE64_HEAD_CHARS=32
 """
@@ -50,6 +53,7 @@ class Settings:
     upstream_model: str
     upstream_timeout_seconds: float
     upstream_api_key: str
+    upstream_strict_json_schema: bool
     log_body_chars: int
     log_base64_head_chars: int
 
@@ -127,6 +131,20 @@ def get_env_float_alias(names: tuple[str, ...], default: float, minimum: float) 
     return max(default, minimum)
 
 
+def get_env_bool_alias(names: tuple[str, ...], default: bool) -> bool:
+    truthy = {"1", "true", "yes", "on"}
+    falsy = {"0", "false", "no", "off"}
+    for name in names:
+        raw = os.getenv(name, "").strip().lower()
+        if not raw:
+            continue
+        if raw in truthy:
+            return True
+        if raw in falsy:
+            return False
+    return default
+
+
 def load_settings() -> Settings:
     return Settings(
         proxy_host=os.getenv("PROXY_HOST", "0.0.0.0").strip() or "0.0.0.0",
@@ -163,6 +181,14 @@ def load_settings() -> Settings:
             "BIGMODEL_API_KEY",
             "DASHSCOPE_API_KEY",
             default="",
+        ),
+        upstream_strict_json_schema=get_env_bool_alias(
+            (
+                "UPSTREAM_STRICT_JSON_SCHEMA",
+                "BIGMODEL_STRICT_JSON_SCHEMA",
+                "DASHSCOPE_STRICT_JSON_SCHEMA",
+            ),
+            True,
         ),
         log_body_chars=get_env_int("PROXY_LOG_BODY_CHARS", 400, 64),
         log_base64_head_chars=get_env_int("PROXY_LOG_BASE64_HEAD_CHARS", 32, 0),
@@ -297,6 +323,111 @@ def build_request_summary(payload: Any, base64_head_chars: int) -> dict[str, Any
 
 def compact_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+ACTION_RESPONSE_SCHEMA: dict[str, Any] = {
+    "oneOf": [
+        {
+            "type": "object",
+            "properties": {
+                "action": {"const": "CLICK"},
+                "x": {"type": "integer"},
+                "y": {"type": "integer"},
+            },
+            "required": ["action", "x", "y"],
+            "additionalProperties": False,
+        },
+        {
+            "type": "object",
+            "properties": {
+                "action": {"const": "LONG_PRESS"},
+                "x": {"type": "integer"},
+                "y": {"type": "integer"},
+                "durationMs": {"type": "integer", "minimum": 1},
+            },
+            "required": ["action", "x", "y"],
+            "additionalProperties": False,
+        },
+        {
+            "type": "object",
+            "properties": {
+                "action": {"const": "SWIPE"},
+                "x1": {"type": "integer"},
+                "y1": {"type": "integer"},
+                "x2": {"type": "integer"},
+                "y2": {"type": "integer"},
+                "durationMs": {"type": "integer", "minimum": 1},
+            },
+            "required": ["action", "x1", "y1", "x2", "y2"],
+            "additionalProperties": False,
+        },
+        {
+            "type": "object",
+            "properties": {
+                "action": {"const": "TYPE_TEXT"},
+                "text": {"type": "string", "minLength": 1},
+            },
+            "required": ["action", "text"],
+            "additionalProperties": False,
+        },
+        {
+            "type": "object",
+            "properties": {
+                "action": {"const": "BACK"},
+            },
+            "required": ["action"],
+            "additionalProperties": False,
+        },
+        {
+            "type": "object",
+            "properties": {
+                "action": {"const": "HOME"},
+            },
+            "required": ["action"],
+            "additionalProperties": False,
+        },
+        {
+            "type": "object",
+            "properties": {
+                "action": {"const": "WAIT"},
+                "durationMs": {"type": "integer", "minimum": 1},
+            },
+            "required": ["action"],
+            "additionalProperties": False,
+        },
+        {
+            "type": "object",
+            "properties": {
+                "action": {"const": "ASK_USER"},
+                "question": {"type": "string", "minLength": 1},
+            },
+            "required": ["action", "question"],
+            "additionalProperties": False,
+        },
+        {
+            "type": "object",
+            "properties": {
+                "action": {"const": "DONE"},
+                "reason": {"type": "string"},
+            },
+            "required": ["action"],
+            "additionalProperties": False,
+        },
+    ]
+}
+
+
+def build_response_format(settings: Settings) -> dict[str, Any]:
+    if not settings.upstream_strict_json_schema:
+        return {"type": "json_object"}
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "agenthost_single_action",
+            "strict": True,
+            "schema": ACTION_RESPONSE_SCHEMA,
+        },
+    }
 
 
 def build_capability_hint(
@@ -546,9 +677,7 @@ def build_upstream_request(payload: dict[str, Any], settings: Settings) -> dict[
                 "content": user_content,
             },
         ],
-        "response_format": {
-            "type": "json_object",
-        },
+        "response_format": build_response_format(settings),
         "temperature": 0,
         "stream": False,
     }
@@ -577,6 +706,7 @@ def build_upstream_request_summary(upstream_payload: dict[str, Any], settings: S
     return {
         "model": upstream_payload.get("model"),
         "hasImage": has_image,
+        "responseFormat": upstream_payload.get("response_format"),
         "systemPrompt": truncate_text(system_content, settings.log_body_chars),
         "userText": truncate_text(user_text, settings.log_body_chars),
     }
@@ -1037,6 +1167,7 @@ def healthz():
         "model": SETTINGS.upstream_model,
         "timeoutSeconds": SETTINGS.upstream_timeout_seconds,
         "apiKeyConfigured": bool(SETTINGS.upstream_api_key),
+        "strictJsonSchema": SETTINGS.upstream_strict_json_schema,
     }
     return jsonify(summary), HTTPStatus.OK
 
@@ -1159,6 +1290,7 @@ def main() -> int:
         "model": SETTINGS.upstream_model,
         "timeoutSeconds": SETTINGS.upstream_timeout_seconds,
         "apiKeyConfigured": bool(SETTINGS.upstream_api_key),
+        "strictJsonSchema": SETTINGS.upstream_strict_json_schema,
     }
     log_line(f"starting proxy {compact_json(config_summary)}")
     APP.run(host=SETTINGS.proxy_host, port=SETTINGS.proxy_port, debug=False)

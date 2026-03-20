@@ -57,6 +57,18 @@ class SessionStateListenerSnapshotTest {
         )
     }
 
+    @Test
+    fun waitingUserDispositionDoesChangeListenerSnapshot() {
+        val base = baseSession()
+
+        assertNotEquals(
+            SessionStateListenerSnapshot.forRenderDiff(base),
+            SessionStateListenerSnapshot.forRenderDiff(
+                base.copy(waitingUserDisposition = WaitingUserDisposition.COMPLETION_CONFIRMATION)
+            )
+        )
+    }
+
     private fun baseSession(): SessionState {
         return SessionState(
             sessionId = "session-1",

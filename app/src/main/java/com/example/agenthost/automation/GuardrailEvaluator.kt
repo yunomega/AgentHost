@@ -69,6 +69,23 @@ class GuardrailEvaluator(
             val previousPoint = state.lastClickPoint
             val radius = config.nearbyClickRadiusPx(beforeObservation)
             val repeatCount = state.nearbyRepeatClickCount
+            val lastLocalSuccessPoint = state.lastLocallyConfirmedClickPoint
+            val lastLocalSuccessStep = state.lastLocallyConfirmedClickStep
+            if (currentPoint != null &&
+                lastLocalSuccessPoint != null &&
+                lastLocalSuccessStep != null &&
+                step - lastLocalSuccessStep <= config.toggleRepeatSuppressionWindow &&
+                currentPoint.isNear(lastLocalSuccessPoint, radius)
+            ) {
+                val replacement = GuiAction.Wait(250L)
+                return GuardrailDecision(
+                    type = GuardrailDecisionType.BLOCK_REPLACE,
+                    finalAction = replacement,
+                    finalCanonicalAction = replacement.toCanonicalAction(sourceMode = action.sourceMode),
+                    rule = "TOGGLE_REPEAT_CLICK_SUPPRESSED",
+                    message = "recent local ROI confirmation near click point"
+                )
+            }
             if (currentPoint != null &&
                 previousPoint != null &&
                 currentPoint.isNear(previousPoint, radius) &&

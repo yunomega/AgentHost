@@ -139,6 +139,31 @@ class OverlayActionDispatcherTest {
         assertEquals("session-2", results.single().second.data["activeSessionId"])
     }
 
+    @Test
+    fun returnToMainStopsSessionWithMigration() {
+        val results = mutableListOf<Pair<String, SessionResult>>()
+        val gateway = FakeGateway(
+            activeSession = baseSession(),
+            stopResult = SessionResult(ok = true, code = "MIGRATED_TO_DEFAULT_DISPLAY")
+        )
+        val dispatcher = OverlayActionDispatcher(
+            coordinatorProvider = { gateway },
+            executor = directExecutor,
+            onActionResult = { action, result -> results += action to result },
+            logger = {}
+        )
+
+        dispatcher.requestReturnToMain(
+            "session-1",
+            recoveryUi.copy(mode = OverlayMode.NEED_USER)
+        )
+
+        assertEquals(1, gateway.stopCalls)
+        assertTrue(gateway.lastStopMigrate)
+        assertEquals("return_to_main", results.single().first)
+        assertEquals("MIGRATED_TO_DEFAULT_DISPLAY", results.single().second.code)
+    }
+
     private fun baseSession(
         sessionId: String = "session-1",
         status: SessionStatus = SessionStatus.WAITING_USER,
@@ -184,6 +209,7 @@ class OverlayActionDispatcherTest {
         var showOnMainCalls = 0
         var replyCalls = 0
         var stopCalls = 0
+        var lastStopMigrate = false
 
         override fun getActiveSession(): SessionState? = activeSession
 
@@ -209,6 +235,7 @@ class OverlayActionDispatcherTest {
 
         override fun stopSession(migrate: Boolean): SessionResult {
             stopCalls += 1
+            lastStopMigrate = migrate
             activeSession = null
             return stopResult
         }

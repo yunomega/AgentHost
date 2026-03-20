@@ -7,6 +7,7 @@ import com.example.agenthost.session.PostCompletionState
 import com.example.agenthost.session.SessionDisplayMode
 import com.example.agenthost.session.SessionState
 import com.example.agenthost.session.SessionStatus
+import com.example.agenthost.session.WaitingUserDisposition
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -126,6 +127,23 @@ class OverlayStateMapperTest {
     }
 
     @Test
+    fun completionConfirmationBeforeMigrationKeepsTaskInBackgroundAndShowsReplyFlow() {
+        val state = mapper.map(
+            baseSession(
+                status = SessionStatus.WAITING_USER,
+                waitingQuestion = "模型判断任务可能已完成，但当前界面仍需你确认。",
+                waitingUserDisposition = WaitingUserDisposition.COMPLETION_CONFIRMATION
+            )
+        )
+
+        assertEquals(OverlayMode.NEED_USER, state.mode)
+        assertTrue(state.requiresReplyInput)
+        assertEquals("继续后台", state.primaryLabel)
+        assertEquals("迁回主屏", state.secondaryLabel)
+        assertFalse(state.alreadyOnMain)
+    }
+
+    @Test
     fun recoverableConflictKeepsOriginalPrimaryAction() {
         val state = mapper.map(
             baseSession(
@@ -238,6 +256,7 @@ class OverlayStateMapperTest {
         surfaceDisplayId: Int? = null,
         status: SessionStatus = SessionStatus.RUNNING,
         waitingQuestion: String? = null,
+        waitingUserDisposition: WaitingUserDisposition = WaitingUserDisposition.STANDARD_HANDOFF,
         migratedToMain: Boolean = false,
         visibleToUser: Boolean = displayMode == SessionDisplayMode.MAIN_DISPLAY || migratedToMain,
         recoveryNeeded: Boolean = false,
@@ -260,6 +279,7 @@ class OverlayStateMapperTest {
             status = status,
             lastError = null,
             waitingQuestion = waitingQuestion,
+            waitingUserDisposition = waitingUserDisposition,
             automationStep = 2,
             displayMode = displayMode,
             visibleToUser = visibleToUser,

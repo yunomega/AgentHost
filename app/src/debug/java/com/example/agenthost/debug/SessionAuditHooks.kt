@@ -13,7 +13,8 @@ object SessionAuditHooks {
     data class StartInjection(
         val skipAttach: Boolean = false,
         val forceReportDisplayId: Int? = null,
-        val plannerConfigOverride: PlannerConfig? = null
+        val plannerConfigOverride: PlannerConfig? = null,
+        val skipWaitingUserAutoMigrate: Boolean = false
     )
 
     private val nextStartInjection = AtomicReference<StartInjection?>(null)
@@ -25,13 +26,15 @@ object SessionAuditHooks {
     fun configureNextStartInjection(
         skipAttach: Boolean,
         forceReportDisplayId: Int?,
-        plannerConfigOverride: PlannerConfig?
+        plannerConfigOverride: PlannerConfig?,
+        skipWaitingUserAutoMigrate: Boolean
     ) {
         nextStartInjection.set(
             StartInjection(
                 skipAttach = skipAttach,
                 forceReportDisplayId = forceReportDisplayId,
-                plannerConfigOverride = plannerConfigOverride
+                plannerConfigOverride = plannerConfigOverride,
+                skipWaitingUserAutoMigrate = skipWaitingUserAutoMigrate
             )
         )
     }
@@ -72,9 +75,11 @@ object SessionAuditHooks {
 
     fun dumpDebugState(): Map<String, Any?> {
         val migrationFault = nextMigrationFault.get()
+        val startInjection = nextStartInjection.get()
         return mapOf(
             "debugHooksEnabled" to true,
-            "startInjectionArmed" to (nextStartInjection.get() != null),
+            "startInjectionArmed" to (startInjection != null),
+            "startInjectionSkipWaitingUserAutoMigrate" to startInjection?.skipWaitingUserAutoMigrate,
             "forceMigrationFailArmed" to nextForceMigrationFail.get(),
             "migrationFaultDirection" to migrationFault?.direction,
             "migrationFaultCode" to migrationFault?.code

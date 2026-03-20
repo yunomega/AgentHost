@@ -13,6 +13,7 @@ import com.example.agenthost.config.ModelConfig
 import com.example.agenthost.config.PlannerConfig
 import com.example.agenthost.core.AgentHostRuntime
 import com.example.agenthost.security.DebugEntryAccessPolicy
+import com.example.agenthost.session.CompletionReturnPolicy
 import com.example.agenthost.session.SessionBootstrapTarget
 import com.example.agenthost.session.SessionDisplayMode
 import com.example.agenthost.session.SessionResult
@@ -35,6 +36,8 @@ class SessionAuditReceiver : BroadcastReceiver() {
         private const val EXTRA_RETURN_TO_VIRTUAL_AFTER_USER = "return_to_virtual_after_user"
         private const val EXTRA_DEBUG_FORCE_MAIN_DISPLAY = "debug_force_main_display"
         private const val EXTRA_BOOTSTRAP_TARGET = "bootstrap_target"
+        private const val EXTRA_COMPLETION_RETURN_POLICY = "completion_return_policy"
+        private const val EXTRA_SKIP_WAITING_USER_AUTO_MIGRATE = "skip_waiting_user_auto_migrate"
         private const val EXTRA_PLANNER_MODE = "planner_mode"
         private const val EXTRA_MODEL_ENDPOINT = "model_endpoint"
         private const val EXTRA_MODEL_API_KEY = "model_api_key"
@@ -159,7 +162,11 @@ class SessionAuditReceiver : BroadcastReceiver() {
                 SessionAuditHooks.configureNextStartInjection(
                     skipAttach = skipAttach,
                     forceReportDisplayId = forceReportDisplayId,
-                    plannerConfigOverride = plannerConfig
+                    plannerConfigOverride = plannerConfig,
+                    skipWaitingUserAutoMigrate = intent.getBooleanExtra(
+                        EXTRA_SKIP_WAITING_USER_AUTO_MIGRATE,
+                        false
+                    )
                 )
                 val result = startWithAutomation(context, command, startOptions)
                 logResult(
@@ -171,6 +178,9 @@ class SessionAuditReceiver : BroadcastReceiver() {
                         "returnToVirtualAfterUser=${startOptions.returnToVirtualAfterUser} " +
                         "debugForceMainDisplay=${startOptions.debugForceMainDisplay} " +
                         "bootstrapTarget=${startOptions.bootstrapTarget.name} " +
+                        "completionReturnPolicy=${startOptions.completionReturnPolicy.name} " +
+                        "skipWaitingUserAutoMigrate=" +
+                        "${intent.getBooleanExtra(EXTRA_SKIP_WAITING_USER_AUTO_MIGRATE, false)} " +
                         "plannerMode=${plannerConfig?.mode?.name ?: "DEFAULT"} " +
                         "modelConfig=${plannerConfig?.modelConfig?.sanitizedSummary() ?: "default"}"
                 )
@@ -546,7 +556,10 @@ class SessionAuditReceiver : BroadcastReceiver() {
             visibleToUser = intent.getBooleanExtra(EXTRA_VISIBLE_TO_USER, false),
             returnToVirtualAfterUser = intent.getBooleanExtra(EXTRA_RETURN_TO_VIRTUAL_AFTER_USER, true),
             debugForceMainDisplay = intent.getBooleanExtra(EXTRA_DEBUG_FORCE_MAIN_DISPLAY, false),
-            bootstrapTarget = parseBootstrapTarget(intent.getStringExtra(EXTRA_BOOTSTRAP_TARGET))
+            bootstrapTarget = parseBootstrapTarget(intent.getStringExtra(EXTRA_BOOTSTRAP_TARGET)),
+            completionReturnPolicy = parseCompletionReturnPolicy(
+                intent.getStringExtra(EXTRA_COMPLETION_RETURN_POLICY)
+            )
         )
     }
 
@@ -561,6 +574,21 @@ class SessionAuditReceiver : BroadcastReceiver() {
                 "event=debug_invalid_bootstrap_target code=INVALID_BOOTSTRAP_TARGET extras=value=$raw"
             )
             SessionBootstrapTarget.NONE
+        }
+    }
+
+    private fun parseCompletionReturnPolicy(rawValue: String?): CompletionReturnPolicy {
+        val raw = rawValue?.trim().orEmpty()
+        if (raw.isBlank()) {
+            return CompletionReturnPolicy.CURRENT_BEHAVIOR
+        }
+        return runCatching { CompletionReturnPolicy.valueOf(raw.uppercase()) }.getOrElse {
+            Log.w(
+                TAG,
+                "event=debug_invalid_completion_return_policy " +
+                    "code=INVALID_COMPLETION_RETURN_POLICY extras=value=$raw"
+            )
+            CompletionReturnPolicy.CURRENT_BEHAVIOR
         }
     }
 

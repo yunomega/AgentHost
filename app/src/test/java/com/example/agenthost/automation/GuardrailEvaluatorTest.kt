@@ -108,6 +108,7 @@ class GuardrailEvaluatorTest {
         assertEquals(CompletionVerdict.UNSURE, post.completionVerdict)
         assertFalse(post.requestSessionComplete)
         assertTrue(post.requestUserHandoff)
+        assertTrue(post.completionConfirmationPending)
         assertEquals("模型判断任务可能已完成，但当前界面仍需你确认。", post.handoffQuestion)
     }
 
@@ -140,6 +141,52 @@ class GuardrailEvaluatorTest {
 
         assertTrue(post.requestSessionComplete)
         assertFalse(post.requestUserHandoff)
+        assertFalse(post.completionConfirmationPending)
+    }
+
+    @Test
+    fun recentlyLocallyConfirmedToggleClickIsSuppressedOnSamePoint() {
+        val coordinator = AgentControlCoordinator(
+            config = GuardrailConfig(toggleRepeatSuppressionWindow = 1)
+        )
+        val before = captured("ZmFrZS1h")
+        val action = CanonicalAction(
+            type = CanonicalActionType.CLICK,
+            coordSpace = CanonicalCoordSpace.IMAGE_PIXEL,
+            point = CanonicalPoint(960, 570)
+        )
+
+        val resolution = coordinator.resolveAction(
+            sessionId = "toggle-session",
+            step = 1,
+            command = "关闭显示密码",
+            beforeObservation = before,
+            action = action
+        )
+        coordinator.finalizeStep(
+            sessionId = "toggle-session",
+            step = 1,
+            command = "关闭显示密码",
+            beforeObservation = before,
+            afterObservation = before,
+            resolution = resolution,
+            executionResult = ActionExecutionResult(ok = true, code = "OK", details = "local roi confirmed"),
+            controlSyntheticCode = null,
+            controlSyntheticDetails = null,
+            localChangeConfirmedPoint = CanonicalPoint(960, 570)
+        )
+
+        val blocked = coordinator.resolveAction(
+            sessionId = "toggle-session",
+            step = 2,
+            command = "关闭显示密码",
+            beforeObservation = before,
+            action = action
+        )
+
+        assertEquals(GuardrailDecisionType.BLOCK_REPLACE, blocked.guardrailDecision.type)
+        assertEquals("TOGGLE_REPEAT_CLICK_SUPPRESSED", blocked.guardrailDecision.rule)
+        assertEquals("WAIT", blocked.finalAction.actionType())
     }
 
     private fun captured(base64: String): ObservationResult.Captured {

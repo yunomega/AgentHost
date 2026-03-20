@@ -6,6 +6,7 @@ import com.example.agenthost.migration.TaskMigrationPolicy
 import com.example.agenthost.session.PostCompletionDisposition
 import com.example.agenthost.session.PostCompletionState
 import com.example.agenthost.session.SessionDisplayMode
+import com.example.agenthost.session.WaitingUserDisposition
 
 class OverlayStateMapper {
     // This mapper is the only owner of canonical session -> overlay presentation mode.
@@ -38,6 +39,9 @@ class OverlayStateMapper {
         }
 
         return when {
+            session.status == SessionStatus.WAITING_USER &&
+                session.waitingUserDisposition == WaitingUserDisposition.COMPLETION_CONFIRMATION ->
+                mapCompletionConfirmation(session)
             session.status == SessionStatus.WAITING_USER && session.migratedToMain -> mapHandoff(session)
             session.status == SessionStatus.WAITING_USER -> mapNeedUser(session)
             else -> mapRunning(session)
@@ -138,6 +142,35 @@ class OverlayStateMapper {
             message = message,
             primaryLabel = if (onMain) "继续处理" else "去主屏处理",
             secondaryLabel = "稍后",
+            alreadyOnMain = onMain,
+            isVirtualDisplaySession = session.displayMode == SessionDisplayMode.VIRTUAL_DISPLAY,
+            lastMigrationCode = session.lastMigrationCode
+        )
+    }
+
+    private fun mapCompletionConfirmation(session: SessionState): OverlayUiState {
+        val onMain = session.migratedToMain || session.displayMode == SessionDisplayMode.MAIN_DISPLAY
+        val question = session.waitingQuestion?.takeIf { it.isNotBlank() }
+        val message = buildString {
+            append(question ?: "模型判断任务可能已完成。")
+            if (onMain) {
+                append("\n如果还要继续后台执行，请输入下一步并提交。")
+            } else {
+                append("\n确认完成可迁回主屏；如果还要继续，请输入下一步并提交。")
+            }
+        }
+        return OverlayUiState(
+            mode = if (session.migratedToMain) OverlayMode.HANDOFF_ACTIVE else OverlayMode.NEED_USER,
+            sessionId = session.sessionId,
+            bubbleText = "确认",
+            bubbleDetail = if (onMain) "主屏确认中" else "待你确认是否完成",
+            bubbleTone = BubbleTone.NEED_USER,
+            title = if (onMain) "主屏确认完成" else "确认是否迁回主屏",
+            message = message,
+            primaryLabel = "继续后台",
+            secondaryLabel = if (onMain) "稍后" else "迁回主屏",
+            requiresReplyInput = true,
+            defaultReplyText = "",
             alreadyOnMain = onMain,
             isVirtualDisplaySession = session.displayMode == SessionDisplayMode.VIRTUAL_DISPLAY,
             lastMigrationCode = session.lastMigrationCode

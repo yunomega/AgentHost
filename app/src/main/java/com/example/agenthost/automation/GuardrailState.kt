@@ -62,6 +62,8 @@ data class GuardrailState(
     val consecutiveBackHomeBlocks: Int = 0,
     val lastClickPoint: CanonicalPoint? = null,
     val nearbyRepeatClickCount: Int = 0,
+    val lastLocallyConfirmedClickPoint: CanonicalPoint? = null,
+    val lastLocallyConfirmedClickStep: Int? = null,
     val completionVerdict: CompletionVerdict = CompletionVerdict.NOT_SATISFIED
 ) {
     fun append(record: ControlStepRecord, maxRecentSteps: Int): GuardrailState {
@@ -85,6 +87,7 @@ data class GuardrailConfig(
     val lowYieldFuseThreshold: Int = 4,
     val recentProgressBackBlockWindow: Int = 2,
     val backHomeBlockEscalationThreshold: Int = 2,
+    val toggleRepeatSuppressionWindow: Int = 1,
     val maxRecentSteps: Int = 6
 ) {
     fun nearbyClickRadiusPx(observation: ObservationResult): Int {

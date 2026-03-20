@@ -85,6 +85,16 @@ class OverlayActionDispatcher(
         }
     }
 
+    fun requestReturnToMain(sessionId: String, overlayUiState: OverlayUiState) {
+        dispatchWithLiveSession(
+            action = "return_to_main",
+            requestedSessionId = sessionId,
+            overlayUiState = overlayUiState
+        ) { gateway, _ ->
+            gateway.stopSession(migrate = true)
+        }
+    }
+
     fun submitNewTask(command: String) {
         val trimmed = command.trim()
         if (trimmed.isEmpty()) {

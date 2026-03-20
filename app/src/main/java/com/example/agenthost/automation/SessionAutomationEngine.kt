@@ -15,6 +15,11 @@ private data class LoopControl(
     var future: Future<*>?
 )
 
+private data class ClickObservationOutcome(
+    val observation: ObservationResult?,
+    val localChangeConfirmedPoint: CanonicalPoint? = null
+)
+
 fun interface InitialObservationRetryPolicy {
     fun shouldRetry(
         snapshot: AutomationSessionSnapshot,
@@ -73,7 +78,12 @@ data class AutomationSessionSnapshot(
 interface AutomationStateCallbacks {
     fun getSnapshot(sessionId: String): AutomationSessionSnapshot?
 
-    fun onSessionWaitingUser(sessionId: String, step: Int, question: String)
+    fun onSessionWaitingUser(
+        sessionId: String,
+        step: Int,
+        question: String,
+        completionConfirmationPending: Boolean
+    )
 
     fun onSessionCompleted(sessionId: String, step: Int, reason: String)
 
@@ -92,6 +102,8 @@ class SessionAutomationEngine(
     private val worker: ExecutorService = Executors.newCachedThreadPool(),
     private val postClickSettleDelayMs: Long = 250L,
     private val postClickSettleRetryDelayMs: Long = 250L,
+    private val toggleExtraSettleDelayMs: Long = 125L,
+    private val toggleExtraSettleFrames: Int = 2,
     private val initialObservationRetryDelayMs: Long = 250L,
     private val initialObservationRetryPolicy: InitialObservationRetryPolicy =
         DefaultInitialObservationRetryPolicy
@@ -488,6 +500,7 @@ class SessionAutomationEngine(
                     var controlSyntheticDetails: String? = null
                     var executionResult: ActionExecutionResult? = null
                     var afterObservation: ObservationResult? = null
+                    var localChangeConfirmedPoint: CanonicalPoint? = null
 
                     when (action) {
                         is GuiAction.Done -> {
@@ -585,12 +598,17 @@ class SessionAutomationEngine(
                                 )
                             } else {
                                 afterObservation = when (action) {
-                                    is GuiAction.Click -> captureClickAfterObservationWithSettle(
+                                    is GuiAction.Click -> {
+                                        val clickOutcome = captureClickAfterObservationWithSettle(
                                         snapshot = snapshot,
                                         step = step,
                                         beforeObservation = observation,
+                                        action = action,
                                         control = control
                                     )
+                                        localChangeConfirmedPoint = clickOutcome.localChangeConfirmedPoint
+                                        clickOutcome.observation
+                                    }
 
                                     else -> capturePostActionObservationWithSettle(
                                         snapshot = snapshot,
@@ -642,7 +660,8 @@ class SessionAutomationEngine(
                         resolution = controlResolution,
                         executionResult = executionResult,
                         controlSyntheticCode = controlSyntheticCode,
-                        controlSyntheticDetails = controlSyntheticDetails
+                        controlSyntheticDetails = controlSyntheticDetails,
+                        localChangeConfirmedPoint = localChangeConfirmedPoint
                     )
                     TaskRunReportHooks.onControlStepEvaluated(
                         sessionId = snapshot.sessionId,
@@ -726,7 +745,8 @@ class SessionAutomationEngine(
                         callbacks.onSessionWaitingUser(
                             sessionId = snapshot.sessionId,
                             step = step,
-                            question = question
+                            question = question,
+                            completionConfirmationPending = postResolution.completionConfirmationPending
                         )
                         return
                     }
@@ -861,8 +881,9 @@ class SessionAutomationEngine(
         snapshot: AutomationSessionSnapshot,
         step: Int,
         beforeObservation: ObservationResult,
+        action: GuiAction.Click,
         control: LoopControl
-    ): ObservationResult? {
+    ): ClickObservationOutcome {
         if (postClickSettleDelayMs > 0L &&
             !sleepInterruptibly(postClickSettleDelayMs, control.stopRequested)
         ) {
@@ -878,7 +899,7 @@ class SessionAutomationEngine(
                 code = "POST_CLICK_SETTLE_SKIPPED",
                 extras = "reason=stop_requested"
             )
-            return null
+            return ClickObservationOutcome(observation = null)
         }
 
         val firstAfter = captureClickAfterObservation(snapshot, step)
@@ -887,8 +908,49 @@ class SessionAutomationEngine(
         if (beforeCaptured == null || afterCaptured == null ||
             !ObservationBitmapUtils.areNearlyUnchanged(beforeCaptured, afterCaptured)
         ) {
-            return firstAfter
+            return ClickObservationOutcome(observation = firstAfter)
         }
+
+        val clickPoint = CanonicalPoint(action.x, action.y)
+        val firstLocalChange = ObservationChangeDetector.detectLocalRoiChangeNearPoint(
+            before = beforeCaptured,
+            after = afterCaptured,
+            point = clickPoint
+        )
+        if (firstLocalChange.confirmed) {
+            log(
+                event = "click_settle",
+                sessionId = snapshot.sessionId,
+                executionDisplayId = snapshot.executionDisplayId,
+                virtualDisplayId = snapshot.virtualDisplayId,
+                surfaceDisplayId = snapshot.surfaceDisplayId,
+                sessionTaskId = snapshot.sessionTaskId,
+                step = step,
+                actionType = "CLICK",
+                code = "LOCAL_ROI_CHANGE_CONFIRMED",
+                extras = "frame=0 x=${action.x} y=${action.y} meanDiff=${firstLocalChange.meanDiff} " +
+                    "changedPixelRatio=${firstLocalChange.significantPixelRatio} " +
+                    "changedPixels=${firstLocalChange.changedPixelCount}/${firstLocalChange.roiPixelCount}"
+            )
+            return ClickObservationOutcome(
+                observation = firstAfter,
+                localChangeConfirmedPoint = clickPoint
+            )
+        }
+        log(
+            event = "click_settle",
+            sessionId = snapshot.sessionId,
+            executionDisplayId = snapshot.executionDisplayId,
+            virtualDisplayId = snapshot.virtualDisplayId,
+            surfaceDisplayId = snapshot.surfaceDisplayId,
+            sessionTaskId = snapshot.sessionTaskId,
+            step = step,
+            actionType = "CLICK",
+            code = "LOCAL_ROI_CHANGE_NOT_CONFIRMED",
+            extras = "frame=0 x=${action.x} y=${action.y} meanDiff=${firstLocalChange.meanDiff} " +
+                "changedPixelRatio=${firstLocalChange.significantPixelRatio} " +
+                "changedPixels=${firstLocalChange.changedPixelCount}/${firstLocalChange.roiPixelCount}"
+        )
 
         log(
             event = "click_settle",
@@ -917,9 +979,121 @@ class SessionAutomationEngine(
                 code = "POST_CLICK_UNCHANGED_RETRY_SKIPPED",
                 extras = "reason=stop_requested"
             )
-            return firstAfter
+            return ClickObservationOutcome(observation = firstAfter)
         }
-        return captureClickAfterObservation(snapshot, step)
+        var latestObservation: ObservationResult = captureClickAfterObservation(snapshot, step)
+        val retryCaptured = latestObservation as? ObservationResult.Captured
+        if (retryCaptured != null &&
+            !ObservationBitmapUtils.areNearlyUnchanged(beforeCaptured, retryCaptured)
+        ) {
+            return ClickObservationOutcome(observation = latestObservation)
+        }
+        val retryLocalChange = retryCaptured?.let {
+            ObservationChangeDetector.detectLocalRoiChangeNearPoint(
+                before = beforeCaptured,
+                after = it,
+                point = clickPoint
+            )
+        }
+        if (retryLocalChange?.confirmed == true) {
+            log(
+                event = "click_settle",
+                sessionId = snapshot.sessionId,
+                executionDisplayId = snapshot.executionDisplayId,
+                virtualDisplayId = snapshot.virtualDisplayId,
+                surfaceDisplayId = snapshot.surfaceDisplayId,
+                sessionTaskId = snapshot.sessionTaskId,
+                step = step,
+                actionType = "CLICK",
+                code = "LOCAL_ROI_CHANGE_CONFIRMED",
+                extras = "frame=1 x=${action.x} y=${action.y} meanDiff=${retryLocalChange.meanDiff} " +
+                    "changedPixelRatio=${retryLocalChange.significantPixelRatio} " +
+                    "changedPixels=${retryLocalChange.changedPixelCount}/${retryLocalChange.roiPixelCount}"
+            )
+            return ClickObservationOutcome(
+                observation = latestObservation,
+                localChangeConfirmedPoint = clickPoint
+            )
+        }
+        log(
+            event = "click_settle",
+            sessionId = snapshot.sessionId,
+            executionDisplayId = snapshot.executionDisplayId,
+            virtualDisplayId = snapshot.virtualDisplayId,
+            surfaceDisplayId = snapshot.surfaceDisplayId,
+            sessionTaskId = snapshot.sessionTaskId,
+            step = step,
+            actionType = "CLICK",
+            code = "LOCAL_ROI_CHANGE_NOT_CONFIRMED",
+            extras = "frame=1 x=${action.x} y=${action.y} meanDiff=${retryLocalChange?.meanDiff ?: 0.0} " +
+                "changedPixelRatio=${retryLocalChange?.significantPixelRatio ?: 0.0} " +
+                "changedPixels=${retryLocalChange?.changedPixelCount ?: 0}/" +
+                "${retryLocalChange?.roiPixelCount ?: 0}"
+        )
+        for (index in 0 until toggleExtraSettleFrames) {
+            log(
+                event = "click_settle",
+                sessionId = snapshot.sessionId,
+                executionDisplayId = snapshot.executionDisplayId,
+                virtualDisplayId = snapshot.virtualDisplayId,
+                surfaceDisplayId = snapshot.surfaceDisplayId,
+                sessionTaskId = snapshot.sessionTaskId,
+                step = step,
+                actionType = "CLICK",
+                code = "TOGGLE_EXTRA_SETTLE_FRAME",
+                extras = "frame=${index + 2} delayMs=$toggleExtraSettleDelayMs x=${action.x} y=${action.y}"
+            )
+            if (toggleExtraSettleDelayMs > 0L &&
+                !sleepInterruptibly(toggleExtraSettleDelayMs, control.stopRequested)
+            ) {
+                return ClickObservationOutcome(observation = latestObservation)
+            }
+            latestObservation = captureClickAfterObservation(snapshot, step)
+            val extraCaptured = latestObservation as? ObservationResult.Captured ?: continue
+            if (!ObservationBitmapUtils.areNearlyUnchanged(beforeCaptured, extraCaptured)) {
+                return ClickObservationOutcome(observation = latestObservation)
+            }
+            val extraLocalChange = ObservationChangeDetector.detectLocalRoiChangeNearPoint(
+                before = beforeCaptured,
+                after = extraCaptured,
+                point = clickPoint
+            )
+            if (extraLocalChange.confirmed) {
+                log(
+                    event = "click_settle",
+                    sessionId = snapshot.sessionId,
+                    executionDisplayId = snapshot.executionDisplayId,
+                    virtualDisplayId = snapshot.virtualDisplayId,
+                    surfaceDisplayId = snapshot.surfaceDisplayId,
+                    sessionTaskId = snapshot.sessionTaskId,
+                    step = step,
+                    actionType = "CLICK",
+                    code = "LOCAL_ROI_CHANGE_CONFIRMED",
+                    extras = "frame=${index + 2} x=${action.x} y=${action.y} meanDiff=${extraLocalChange.meanDiff} " +
+                        "changedPixelRatio=${extraLocalChange.significantPixelRatio} " +
+                        "changedPixels=${extraLocalChange.changedPixelCount}/${extraLocalChange.roiPixelCount}"
+                )
+                return ClickObservationOutcome(
+                    observation = latestObservation,
+                    localChangeConfirmedPoint = clickPoint
+                )
+            }
+            log(
+                event = "click_settle",
+                sessionId = snapshot.sessionId,
+                executionDisplayId = snapshot.executionDisplayId,
+                virtualDisplayId = snapshot.virtualDisplayId,
+                surfaceDisplayId = snapshot.surfaceDisplayId,
+                sessionTaskId = snapshot.sessionTaskId,
+                step = step,
+                actionType = "CLICK",
+                code = "LOCAL_ROI_CHANGE_NOT_CONFIRMED",
+                extras = "frame=${index + 2} x=${action.x} y=${action.y} meanDiff=${extraLocalChange.meanDiff} " +
+                    "changedPixelRatio=${extraLocalChange.significantPixelRatio} " +
+                    "changedPixels=${extraLocalChange.changedPixelCount}/${extraLocalChange.roiPixelCount}"
+            )
+        }
+        return ClickObservationOutcome(observation = latestObservation)
     }
 
     private fun capturePostActionObservationWithSettle(

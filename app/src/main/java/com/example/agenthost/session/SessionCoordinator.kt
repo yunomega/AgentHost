@@ -49,8 +49,13 @@ class SessionCoordinator(
         private const val TASK_MIGRATION_PRECHECK_OK = "TASK_MIGRATION_PRECHECK_OK"
     }
 
+    private data class SessionDebugBehavior(
+        val skipWaitingUserAutoMigrate: Boolean = false
+    )
+
     private val lock = Any()
     private val sessionStateListeners = linkedSetOf<SessionStateListener>()
+    private val debugSessionBehaviors = mutableMapOf<String, SessionDebugBehavior>()
     private var lastRenderDiffSnapshot: SessionStateListenerSnapshot? = null
     private var activeSession: SessionState? = null
         set(value) {
@@ -95,7 +100,12 @@ class SessionCoordinator(
                 }
             }
 
-	            override fun onSessionWaitingUser(sessionId: String, step: Int, question: String) {
+	            override fun onSessionWaitingUser(
+                    sessionId: String,
+                    step: Int,
+                    question: String,
+                    completionConfirmationPending: Boolean
+                ) {
 	                synchronized(lock) {
 	                    val state = activeSession ?: return
 	                    if (state.sessionId != sessionId || state.status != SessionStatus.RUNNING) {
@@ -112,9 +122,14 @@ class SessionCoordinator(
 	                    var waiting = state.copy(
 	                        status = SessionStatus.WAITING_USER,
 	                        waitingQuestion = question,
-                        automationStep = step,
-                        lastError = null
-                    )
+                            waitingUserDisposition = if (completionConfirmationPending) {
+                                WaitingUserDisposition.COMPLETION_CONFIRMATION
+                            } else {
+                                WaitingUserDisposition.STANDARD_HANDOFF
+                            },
+                            automationStep = step,
+                            lastError = null
+                        )
                     activeSession = waiting
                     logInfo(
                         event = "session_waiting_user",
@@ -124,29 +139,42 @@ class SessionCoordinator(
                         code = "WAITING_USER",
                         extras = "question=$question"
                     )
-                    if (waiting.displayMode == SessionDisplayMode.VIRTUAL_DISPLAY) {
+                    if (waiting.displayMode == SessionDisplayMode.VIRTUAL_DISPLAY &&
+                        waiting.waitingUserDisposition == WaitingUserDisposition.STANDARD_HANDOFF
+                    ) {
                         syncExecutionDisplayPolicyStateLocked(
                             waiting,
                             bridgeState = ExecutionDisplayBridgeState.USER_HANDOFF,
                             reason = "waiting_user"
                         )
-                        waiting = migrateTaskToMainLocked(waiting, trigger = "waiting_user")
-                        activeSession = waiting
-                        if (waiting.migratedToMain) {
+                        if (shouldAutoMigrateWaitingUserLocked(waiting.sessionId)) {
+                            waiting = migrateTaskToMainLocked(waiting, trigger = "waiting_user")
+                            activeSession = waiting
+                            if (waiting.migratedToMain) {
+                                logInfo(
+                                    event = "waiting_user_after_migration",
+                                    state = waiting,
+                                    step = step,
+                                    actionType = "ASK_USER",
+                                    code = waiting.lastMigrationCode ?: "TASK_MIGRATION_OK",
+                                    extras = migrationExtras(
+                                        sourceDisplayId = waiting.executionDisplayId,
+                                        targetDisplayId = Display.DEFAULT_DISPLAY,
+                                        taskId = waiting.lastKnownTaskId,
+                                        topActivity = waiting.lastKnownTopActivity,
+                                        packageName = waiting.lastKnownTopPackage,
+                                        reason = "trigger=waiting_user"
+                                    )
+                                )
+                            }
+                        } else {
                             logInfo(
-                                event = "waiting_user_after_migration",
+                                event = "waiting_user_auto_migrate_skipped",
                                 state = waiting,
                                 step = step,
                                 actionType = "ASK_USER",
-                                code = waiting.lastMigrationCode ?: "TASK_MIGRATION_OK",
-                                extras = migrationExtras(
-                                    sourceDisplayId = waiting.executionDisplayId,
-                                    targetDisplayId = Display.DEFAULT_DISPLAY,
-                                    taskId = waiting.lastKnownTaskId,
-                                    topActivity = waiting.lastKnownTopActivity,
-                                    packageName = waiting.lastKnownTopPackage,
-                                    reason = "trigger=waiting_user"
-                                )
+                                code = "WAITING_USER_AUTO_MIGRATE_SKIPPED",
+                                extras = "reason=debug_skip_waiting_user_auto_migrate"
                             )
                         }
                     }
@@ -171,6 +199,7 @@ class SessionCoordinator(
 	                        state.copy(
 	                            status = SessionStatus.COMPLETED,
                             waitingQuestion = null,
+                            waitingUserDisposition = WaitingUserDisposition.STANDARD_HANDOFF,
                             automationStep = step,
                             lastError = null,
                             postCompletionDisposition = resolvePostCompletionDisposition(state),
@@ -236,6 +265,7 @@ class SessionCoordinator(
 	                        state.copy(
 	                            status = SessionStatus.FAILED,
 	                            waitingQuestion = null,
+	                            waitingUserDisposition = WaitingUserDisposition.STANDARD_HANDOFF,
 	                            automationStep = step,
 	                            lastError = code
 	                        ),
@@ -343,6 +373,7 @@ class SessionCoordinator(
             status = SessionStatus.STARTING,
             lastError = null,
             waitingQuestion = null,
+            waitingUserDisposition = WaitingUserDisposition.STANDARD_HANDOFF,
             automationStep = 0,
             displayMode = resolvedMode,
             visibleToUser = resolvedMode == SessionDisplayMode.MAIN_DISPLAY,
@@ -379,6 +410,12 @@ class SessionCoordinator(
         syncExecutionDisplayPolicyRegistrationLocked(state, reason = "session_start")
 
         val debugStartInjection = SessionAuditHooks.consumeStartInjection()
+        setDebugBehaviorLocked(
+            sessionId = sessionId,
+            behavior = SessionDebugBehavior(
+                skipWaitingUserAutoMigrate = debugStartInjection.skipWaitingUserAutoMigrate
+            )
+        )
         activePlannerConfig = options.plannerConfigOverride
             ?: debugStartInjection.plannerConfigOverride
             ?: PlannerConfig()
@@ -419,6 +456,7 @@ class SessionCoordinator(
             status = SessionStatus.READY,
             lastError = null,
             waitingQuestion = null,
+            waitingUserDisposition = WaitingUserDisposition.STANDARD_HANDOFF,
             automationStep = 0
         )
         activeSession = state
@@ -470,6 +508,7 @@ class SessionCoordinator(
         val running = state.copy(
             status = SessionStatus.RUNNING,
             waitingQuestion = null,
+            waitingUserDisposition = WaitingUserDisposition.STANDARD_HANDOFF,
             automationStep = 0,
             lastError = null
         )
@@ -555,6 +594,7 @@ class SessionCoordinator(
                 val waiting = returned.copy(
                     status = SessionStatus.WAITING_USER,
                     waitingQuestion = state.waitingQuestion,
+                    waitingUserDisposition = state.waitingUserDisposition,
                     lastError = null,
                     recoveryNeeded = true
                 )
@@ -584,6 +624,7 @@ class SessionCoordinator(
         val running = migratedState.copy(
             status = SessionStatus.RUNNING,
             waitingQuestion = null,
+            waitingUserDisposition = WaitingUserDisposition.STANDARD_HANDOFF,
             lastError = null,
             recoveryNeeded = false
         )
@@ -805,7 +846,8 @@ class SessionCoordinator(
         var stopping = state.copy(
             status = SessionStatus.STOPPING,
             lastError = null,
-            waitingQuestion = null
+            waitingQuestion = null,
+            waitingUserDisposition = WaitingUserDisposition.STANDARD_HANDOFF
         )
         activeSession = stopping
         logInfo(
@@ -829,12 +871,31 @@ class SessionCoordinator(
 
         stopping = dismissMirrorSurfaceLocked(stopping, reason = "stop_session")
         activeSession = stopping
+        if (migrate) {
+            val rebound = bindStopMigrationState(stopping, ::resolveInitialMigrationTargetLocked)
+            if (rebound != stopping) {
+                stopping = rebound
+                activeSession = stopping
+                logInfo(
+                    event = "stop_session_migration_target_bound",
+                    state = stopping,
+                    step = stopping.automationStep,
+                    actionType = "NONE",
+                    code = "STOP_MIGRATION_TARGET_BOUND",
+                    extras = "taskId=${stopping.lastKnownTaskId} package=${stopping.lastKnownTopPackage ?: "null"}"
+                )
+            }
+        }
 
-        val taskId = stopping.sessionTaskId
+        val taskId = if (migrate) {
+            preferredStopMigrationTaskId(stopping)
+        } else {
+            stopping.sessionTaskId
+        }
         if (taskId <= 0) {
             val code = when {
                 preemptive -> "PREEMPTIVE_CLEANUP"
-                migrate -> "MIGRATION_FAILED"
+                migrate -> stopping.lastMigrationCode ?: "MIGRATION_FAILED"
                 else -> "CLOSE_FAILED"
             }
             return failAndCleanupLocked(
@@ -874,6 +935,7 @@ class SessionCoordinator(
                 status = finalStatus,
                 lastError = null,
                 waitingQuestion = null,
+                waitingUserDisposition = WaitingUserDisposition.STANDARD_HANDOFF,
                 visibleToUser = migrate && stopping.displayMode == SessionDisplayMode.MAIN_DISPLAY,
                 migratedToMain = false
             )
@@ -1993,7 +2055,8 @@ class SessionCoordinator(
             val failedState = failedBase.copy(
                 status = SessionStatus.FAILED,
                 lastError = code,
-                waitingQuestion = null
+                waitingQuestion = null,
+                waitingUserDisposition = WaitingUserDisposition.STANDARD_HANDOFF
             )
             activeSession = failedState
             logError(
@@ -2058,6 +2121,7 @@ class SessionCoordinator(
         SessionSurfaceRegistry.finish(sessionId)
         SessionBridge.clear(sessionId)
         automationEngine.finishSession(sessionId)
+        clearDebugBehaviorLocked(sessionId)
         activePlannerConfig = PlannerConfig()
         activeRuntime?.release()
         activeRuntime = null
@@ -2075,10 +2139,31 @@ class SessionCoordinator(
             SessionBridge.clear(it)
             automationEngine.clearSession(it)
         }
+        clearDebugBehaviorLocked(sessionId)
         activePlannerConfig = PlannerConfig()
         activeRuntime?.release()
         activeRuntime = null
         activeSession = null
+    }
+
+    private fun setDebugBehaviorLocked(sessionId: String, behavior: SessionDebugBehavior) {
+        if (behavior.skipWaitingUserAutoMigrate) {
+            debugSessionBehaviors[sessionId] = behavior
+        } else {
+            debugSessionBehaviors.remove(sessionId)
+        }
+    }
+
+    private fun shouldAutoMigrateWaitingUserLocked(sessionId: String): Boolean {
+        return debugSessionBehaviors[sessionId]?.skipWaitingUserAutoMigrate != true
+    }
+
+    private fun clearDebugBehaviorLocked(sessionId: String?) {
+        if (sessionId == null) {
+            debugSessionBehaviors.clear()
+        } else {
+            debugSessionBehaviors.remove(sessionId)
+        }
     }
 
     private fun syncExecutionDisplayPolicyRegistrationLocked(
@@ -2229,6 +2314,7 @@ class SessionCoordinator(
             "postCompletionResultCode" to state.postCompletionResultCode,
             "lastError" to state.lastError,
             "waitingQuestion" to state.waitingQuestion,
+            "waitingUserDisposition" to state.waitingUserDisposition.name,
             "automationStep" to state.automationStep,
             "plannerMode" to activePlannerConfig.mode.name,
             "actionType" to "NONE"
@@ -2253,6 +2339,7 @@ class SessionCoordinator(
     ): SessionState {
         return state.copy(
             waitingQuestion = null,
+            waitingUserDisposition = WaitingUserDisposition.STANDARD_HANDOFF,
             lastError = null,
             recoveryNeeded = false,
             visibleToUser = if (success) state.visibleToUser else false,
@@ -2484,5 +2571,37 @@ class SessionCoordinator(
         sessionStateListeners.forEach { listener ->
             listener.onSessionChanged(session)
         }
+    }
+}
+
+internal fun bindStopMigrationState(
+    state: SessionState,
+    resolveTarget: (SessionState) -> TaskMigrationTarget?
+): SessionState {
+    if (state.displayMode != SessionDisplayMode.VIRTUAL_DISPLAY || state.lastKnownTaskId > 0) {
+        return state
+    }
+    val target = resolveTarget(state) ?: return state.copy(
+        lastMigrationCode = "TARGET_TASK_NOT_FOUND",
+        lastMigrationDirection = "TO_MAIN"
+    )
+    return state.copy(
+        lastKnownTaskId = target.taskId,
+        lastKnownTopActivity = target.topActivity,
+        lastKnownTopPackage = target.packageName,
+        lastKnownTaskAlive = true,
+        lastKnownTaskDisplayId = target.displayId,
+        currentVisibleDisplayId = target.displayId
+    )
+}
+
+internal fun preferredStopMigrationTaskId(state: SessionState): Int {
+    return when {
+        state.displayMode == SessionDisplayMode.VIRTUAL_DISPLAY &&
+            state.lastKnownTaskId > 0 -> state.lastKnownTaskId
+
+        state.displayMode == SessionDisplayMode.VIRTUAL_DISPLAY -> -1
+
+        else -> state.sessionTaskId
     }
 }

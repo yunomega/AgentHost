@@ -44,6 +44,7 @@ class SessionAutomationEngineModelModeTest {
         assertTrue(callbacks.waitingLatch.await(2, TimeUnit.SECONDS))
         assertEquals(SessionStatus.WAITING_USER, callbacks.status())
         assertEquals("请输入验证码", callbacks.waitingQuestion)
+        assertFalse(callbacks.completionConfirmationPending)
 
         callbacks.markRunning()
         assertTrue(engine.replyToSession("s1", "123456").ok)
@@ -331,6 +332,7 @@ class SessionAutomationEngineModelModeTest {
         assertTrue(callbacks.waitingLatch.await(2, TimeUnit.SECONDS))
         assertEquals(SessionStatus.WAITING_USER, callbacks.status())
         assertEquals("模型判断任务可能已完成，但当前界面仍需你确认。", callbacks.waitingQuestion)
+        assertTrue(callbacks.completionConfirmationPending)
         assertEquals(2, captureCalls.get())
         val observation = plannedObservation.get() as? ObservationResult.Captured
         assertEquals("second_real_frame", observation?.base64Png)
@@ -390,6 +392,7 @@ class SessionAutomationEngineModelModeTest {
         assertTrue(callbacks.waitingLatch.await(2, TimeUnit.SECONDS))
         assertEquals(SessionStatus.WAITING_USER, callbacks.status())
         assertEquals("模型判断任务可能已完成，但当前界面仍需你确认。", callbacks.waitingQuestion)
+        assertTrue(callbacks.completionConfirmationPending)
         assertEquals(2, captureCalls.get())
         assertEquals(firstObservation, plannedObservation.get())
     }
@@ -460,6 +463,7 @@ class SessionAutomationEngineModelModeTest {
         assertTrue(callbacks.waitingLatch.await(2, TimeUnit.SECONDS))
         assertEquals(SessionStatus.WAITING_USER, callbacks.status())
         assertEquals("模型判断任务可能已完成，但当前界面仍需你确认。", callbacks.waitingQuestion)
+        assertTrue(callbacks.completionConfirmationPending)
         assertEquals(4, captureCalls.get())
         assertEquals(frameB, stepTwoObservation.get())
     }
@@ -556,14 +560,21 @@ class SessionAutomationEngineModelModeTest {
         val completedLatch = CountDownLatch(1)
         val failedLatch = CountDownLatch(1)
         @Volatile var waitingQuestion: String? = null
+        @Volatile var completionConfirmationPending: Boolean = false
 
         override fun getSnapshot(sessionId: String): AutomationSessionSnapshot? = synchronized(lock) {
             if (snapshot.sessionId == sessionId) snapshot else null
         }
 
-        override fun onSessionWaitingUser(sessionId: String, step: Int, question: String) {
+        override fun onSessionWaitingUser(
+            sessionId: String,
+            step: Int,
+            question: String,
+            completionConfirmationPending: Boolean
+        ) {
             synchronized(lock) {
                 waitingQuestion = question
+                this.completionConfirmationPending = completionConfirmationPending
                 snapshot = snapshot.copy(status = SessionStatus.WAITING_USER)
             }
             waitingLatch.countDown()
@@ -604,7 +615,12 @@ class SessionAutomationEngineModelModeTest {
             snapshots[sessionId]
         }
 
-        override fun onSessionWaitingUser(sessionId: String, step: Int, question: String) {
+        override fun onSessionWaitingUser(
+            sessionId: String,
+            step: Int,
+            question: String,
+            completionConfirmationPending: Boolean
+        ) {
             synchronized(lock) {
                 val snapshot = snapshots[sessionId] ?: return
                 snapshots[sessionId] = snapshot.copy(status = SessionStatus.WAITING_USER)
