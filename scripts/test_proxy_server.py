@@ -113,12 +113,7 @@ class ProxyServerPlanTest(unittest.TestCase):
 
         upstream_payload = fake_session.calls[0]["json"]
         response_format = upstream_payload["response_format"]
-        self.assertEqual("json_schema", response_format["type"])
-        self.assertEqual("agenthost_single_action", response_format["json_schema"]["name"])
-        self.assertTrue(response_format["json_schema"]["strict"])
-        schema = response_format["json_schema"]["schema"]
-        self.assertEqual("CLICK", schema["oneOf"][0]["properties"]["action"]["const"])
-        self.assertEqual(["action", "x", "y"], schema["oneOf"][0]["required"])
+        self.assertEqual({"type": "json_object"}, response_format)
         messages = upstream_payload["messages"]
         system_prompt = messages[0]["content"]
         user_text = messages[1]["content"][0]["text"]
@@ -304,21 +299,21 @@ class ProxyServerPlanTest(unittest.TestCase):
         self.assertEqual("bigmodel-model", settings.upstream_model)
         self.assertEqual(31.0, settings.upstream_timeout_seconds)
         self.assertEqual("bigmodel-key", settings.upstream_api_key)
-        self.assertTrue(settings.upstream_strict_json_schema)
+        self.assertFalse(settings.upstream_strict_json_schema)
 
-    def test_load_settings_allows_disabling_strict_json_schema(self):
+    def test_load_settings_allows_enabling_strict_json_schema(self):
         with mock.patch.dict(
             os.environ,
             {
-                "UPSTREAM_STRICT_JSON_SCHEMA": "false",
+                "UPSTREAM_STRICT_JSON_SCHEMA": "true",
             },
             clear=True,
         ):
             settings = PROXY_SERVER.load_settings()
 
-        self.assertFalse(settings.upstream_strict_json_schema)
+        self.assertTrue(settings.upstream_strict_json_schema)
 
-    def test_plan_can_fallback_to_json_object_response_format_by_setting(self):
+    def test_plan_can_enable_json_schema_response_format_by_setting(self):
         fake_session = FakeSession(
             [
                 FakeResponse(
@@ -336,13 +331,16 @@ class ProxyServerPlanTest(unittest.TestCase):
             ]
         )
         PROXY_SERVER.SESSION = fake_session
-        PROXY_SERVER.SETTINGS = self.make_settings(upstream_strict_json_schema=False)
+        PROXY_SERVER.SETTINGS = self.make_settings(upstream_strict_json_schema=True)
 
         response = self.client.post("/plan", json=self.make_payload())
 
         self.assertEqual(200, response.status_code)
         upstream_payload = fake_session.calls[0]["json"]
-        self.assertEqual({"type": "json_object"}, upstream_payload["response_format"])
+        response_format = upstream_payload["response_format"]
+        self.assertEqual("json_schema", response_format["type"])
+        self.assertEqual("agenthost_single_action", response_format["json_schema"]["name"])
+        self.assertTrue(response_format["json_schema"]["strict"])
 
     def make_settings(self, **overrides):
         values = {

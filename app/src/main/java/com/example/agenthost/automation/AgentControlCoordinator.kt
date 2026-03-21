@@ -1,5 +1,6 @@
 package com.example.agenthost.automation
 
+import com.example.agenthost.core.AgentHostLog
 import java.util.concurrent.ConcurrentHashMap
 
 data class ControlActionResolution(
@@ -7,34 +8,35 @@ data class ControlActionResolution(
     val proposedAction: CanonicalAction,
     val finalAction: GuiAction,
     val finalCanonicalAction: CanonicalAction,
-    val guardrailDecision: GuardrailDecision
+    val recoveryDecision: RecoveryPolicyDecision
 )
 
-/**
- * Control-layer post-step resolution.
- *
- * The request fields are instructions for the coordinator callback boundary,
- * not canonical session states.
- */
 data class ControlPostActionResolution(
     val phaseBefore: SubgoalPhase,
     val phaseAfter: SubgoalPhase,
-    val completionVerdict: CompletionVerdict,
+    val goalStatus: GoalSatisfactionStatus,
     val resultSummary: StepResultSummary,
-    val observationChanged: Boolean?,
+    val progressEvidence: ProgressEvidence,
     val requestSessionComplete: Boolean,
     val completionReason: String?,
     val requestUserHandoff: Boolean,
     val handoffQuestion: String?,
     val completionConfirmationPending: Boolean
-)
+) {
+    val observationChanged: Boolean?
+        get() = progressEvidence.observationChanged
+}
 
 class AgentControlCoordinator(
     private val subgoalStateMachine: SubgoalStateMachine = SubgoalStateMachine(),
-    private val guardrailEvaluator: GuardrailEvaluator = GuardrailEvaluator(),
-    private val completionEvaluator: TaskTerminalCondition = DefaultCompletionEvaluator(),
+    private val recoveryPolicy: RecoveryPolicy = DefaultRecoveryPolicy(),
+    private val goalSatisfactionEvaluator: GoalSatisfactionEvaluator = DefaultGoalSatisfactionEvaluator(),
     private val config: GuardrailConfig = GuardrailConfig()
 ) {
+    companion object {
+        private const val TAG = "AgentControlCoordinator"
+    }
+
     private val states = ConcurrentHashMap<String, GuardrailState>()
 
     fun clearSession(sessionId: String) {
@@ -46,9 +48,7 @@ class AgentControlCoordinator(
         command: String,
         capabilityProfile: CapabilityProfile
     ): AgentControlSnapshot {
-        val state = states.computeIfAbsent(sessionId) {
-            GuardrailState(subgoalState = subgoalStateMachine.initialState(command))
-        }
+        val state = stateFor(sessionId, command)
         val recentActions = state.recentSteps
             .toList()
             .takeLast(4)
@@ -62,16 +62,24 @@ class AgentControlCoordinator(
                     phaseAfter = it.phaseAfter
                 )
             }
+        val constraints = recoveryPolicy.refineActionConstraints(
+            state = state,
+            capabilityProfile = capabilityProfile,
+            baseAllowedActions = subgoalStateMachine.allowedActions(
+                phase = state.subgoalState.phase,
+                capabilityProfile = capabilityProfile
+            )
+        )
         return AgentControlSnapshot(
             globalTask = command,
             currentPhase = state.subgoalState.phase.name,
             parentHint = state.subgoalState.spec?.parentHint,
             targetHint = state.subgoalState.spec?.targetHint,
-            allowedActions = subgoalStateMachine.allowedActions(state.subgoalState.phase, capabilityProfile),
-            blockedActions = subgoalStateMachine.blockedActions(state.subgoalState.phase, capabilityProfile),
+            allowedActions = constraints.allowedActions,
+            blockedActions = constraints.blockedActions,
             recentActions = recentActions,
             lastResult = state.lastResult?.categoryName(),
-            completionState = state.completionVerdict.name,
+            completionState = state.lastGoalStatus.name,
             doneOnly = state.subgoalState.phase == SubgoalPhase.DONE_ONLY
         )
     }
@@ -81,23 +89,27 @@ class AgentControlCoordinator(
         step: Int,
         command: String,
         beforeObservation: ObservationResult,
-        action: CanonicalAction
+        action: CanonicalAction,
+        surfaceContext: SurfaceContext = SurfaceContext()
     ): ControlActionResolution {
-        val state = states.computeIfAbsent(sessionId) {
-            GuardrailState(subgoalState = subgoalStateMachine.initialState(command))
-        }
-        val decision = guardrailEvaluator.evaluatePreExecution(
-            step = step,
-            state = state,
-            beforeObservation = beforeObservation,
-            action = action
+        val state = stateFor(sessionId, command)
+        val decision = recoveryPolicy.decide(
+            RecoveryPolicyInput(
+                step = step,
+                state = state,
+                beforeObservation = beforeObservation,
+                proposedAction = action,
+                goalStatus = state.lastGoalStatus,
+                surfaceContext = surfaceContext
+            )
         )
+        logRecovery(sessionId, step, action, decision)
         return ControlActionResolution(
             phaseBefore = state.subgoalState.phase,
             proposedAction = action,
             finalAction = decision.finalAction,
             finalCanonicalAction = decision.finalCanonicalAction,
-            guardrailDecision = decision
+            recoveryDecision = decision
         )
     }
 
@@ -111,93 +123,238 @@ class AgentControlCoordinator(
         executionResult: ActionExecutionResult?,
         controlSyntheticCode: String?,
         controlSyntheticDetails: String?,
-        localChangeConfirmedPoint: CanonicalPoint? = null
+        localChangeConfirmedPoint: CanonicalPoint? = null,
+        surfaceContext: SurfaceContext = SurfaceContext()
     ): ControlPostActionResolution {
-        val state = states.computeIfAbsent(sessionId) {
-            GuardrailState(subgoalState = subgoalStateMachine.initialState(command))
-        }
-        val observationChanged = if (localChangeConfirmedPoint != null) {
-            true
-        } else {
-            detectObservationChange(beforeObservation, afterObservation)
-        }
-        val modelRequestedDone = resolution.proposedAction.type == CanonicalActionType.DONE
+        val state = stateFor(sessionId, command)
+        val observationChanged = detectObservationChange(
+            beforeObservation = beforeObservation,
+            afterObservation = afterObservation,
+            localChangeConfirmedPoint = localChangeConfirmedPoint
+        )
         val candidatePhase = subgoalStateMachine.advancePhase(
             state = state.subgoalState,
             action = resolution.finalCanonicalAction,
             observationChanged = observationChanged
         )
-        val completionVerdict = completionEvaluator.evaluate(
-            CompletionInput(
+        var evidence = buildProgressEvidence(
+            command = command,
+            state = state,
+            beforeObservation = beforeObservation,
+            afterObservation = afterObservation,
+            surfaceContext = surfaceContext,
+            resolution = resolution,
+            executionResult = executionResult,
+            controlSyntheticCode = controlSyntheticCode,
+            controlSyntheticDetails = controlSyntheticDetails,
+            localChangeConfirmedPoint = localChangeConfirmedPoint,
+            observationChanged = observationChanged,
+            candidatePhase = candidatePhase
+        )
+        logEvidence(sessionId, step, evidence)
+
+        val goalDecision = goalSatisfactionEvaluator.evaluate(
+            GoalSatisfactionInput(
                 task = command,
                 beforeObservation = beforeObservation,
                 afterObservation = afterObservation,
+                progressEvidence = evidence,
                 recentSteps = state.recentSteps.toList(),
-                lastAction = resolution.finalCanonicalAction,
+                proposedAction = resolution.proposedAction,
+                finalAction = resolution.finalCanonicalAction,
                 guardrailState = state,
                 subgoalState = candidatePhase,
-                previousSubgoalState = state.subgoalState,
-                modelRequestedDone = modelRequestedDone,
-                observationChanged = observationChanged
+                previousSubgoalState = state.subgoalState
             )
         )
+        evidence = evidence.copy(needsUserConfirmation = goalDecision.needsUserConfirmation)
+        logGoal(sessionId, step, goalDecision)
+
         val nextPhase = subgoalStateMachine.finalizePhase(
             candidateState = candidatePhase,
-            completionVerdict = completionVerdict
+            goalStatus = goalDecision.status
         )
         val resultSummary = buildResultSummary(
             resolution = resolution,
             executionResult = executionResult,
             controlSyntheticCode = controlSyntheticCode,
             controlSyntheticDetails = controlSyntheticDetails,
-            observationChanged = observationChanged,
-            completionVerdict = completionVerdict,
-            state = state,
-            localChangeConfirmedPoint = localChangeConfirmedPoint
+            progressEvidence = evidence,
+            goalStatus = goalDecision.status
         )
-        val requiresDoneConfirmation = resolution.finalCanonicalAction.type == CanonicalActionType.DONE &&
-            beforeObservation is ObservationResult.Captured &&
-            completionVerdict != CompletionVerdict.SATISFIED
-        val requestUserHandoff = resultSummary.category == StepResultCategory.LOW_YIELD_HANDOFF
-            || requiresDoneConfirmation
         val updated = updateState(
             previous = state,
             step = step,
             resolution = resolution,
             resultSummary = resultSummary,
-            observationChanged = observationChanged,
             nextPhase = nextPhase,
             afterObservation = afterObservation,
-            guardrailRule = resolution.guardrailDecision.rule,
+            progressEvidence = evidence,
+            goalDecision = goalDecision,
+            surfaceContext = surfaceContext,
             localChangeConfirmedPoint = localChangeConfirmedPoint
         )
         states[sessionId] = updated
+
+        val requestSessionComplete = goalDecision.status == GoalSatisfactionStatus.SATISFIED
+        val requestUserHandoff = goalDecision.status == GoalSatisfactionStatus.NEED_USER
         return ControlPostActionResolution(
             phaseBefore = state.subgoalState.phase,
             phaseAfter = nextPhase.phase,
-            completionVerdict = completionVerdict,
+            goalStatus = goalDecision.status,
             resultSummary = resultSummary,
-            observationChanged = observationChanged,
-            requestSessionComplete = completionVerdict == CompletionVerdict.SATISFIED ||
-                (resolution.finalCanonicalAction.type == CanonicalActionType.DONE && !requiresDoneConfirmation),
-            completionReason = when {
-                completionVerdict == CompletionVerdict.SATISFIED -> "completion_evaluator_satisfied"
-                resolution.finalCanonicalAction.type == CanonicalActionType.DONE && !requiresDoneConfirmation ->
-                    resolution.finalCanonicalAction.reason ?: "model_done"
-                else -> null
-            },
-            requestUserHandoff = requestUserHandoff,
-            handoffQuestion = if (requestUserHandoff) {
-                if (requiresDoneConfirmation) {
-                    "模型判断任务可能已完成，但当前界面仍需你确认。"
-                } else {
-                    "连续多步没有明显推进，当前需要你接手确认下一步。"
-                }
+            progressEvidence = evidence,
+            requestSessionComplete = requestSessionComplete,
+            completionReason = if (requestSessionComplete) {
+                goalDecision.completionReason ?: resultSummary.message
             } else {
                 null
             },
-            completionConfirmationPending = requiresDoneConfirmation
+            requestUserHandoff = requestUserHandoff,
+            handoffQuestion = if (requestUserHandoff) {
+                goalDecision.userQuestion ?: "当前需要你接手确认下一步。"
+            } else {
+                null
+            },
+            completionConfirmationPending = goalDecision.needsUserConfirmation
         )
+    }
+
+    private fun buildProgressEvidence(
+        command: String,
+        state: GuardrailState,
+        beforeObservation: ObservationResult,
+        afterObservation: ObservationResult?,
+        surfaceContext: SurfaceContext,
+        resolution: ControlActionResolution,
+        executionResult: ActionExecutionResult?,
+        controlSyntheticCode: String?,
+        controlSyntheticDetails: String?,
+        localChangeConfirmedPoint: CanonicalPoint?,
+        observationChanged: Boolean?,
+        candidatePhase: SubgoalState
+    ): ProgressEvidence {
+        val surfaceChanged = surfaceContext != state.lastSurfaceContext
+        val observationDelta = ObservationDeltaEvidence(
+            globalChanged = observationChanged,
+            localRoiChanged = localChangeConfirmedPoint != null,
+            surfaceChanged = surfaceChanged
+        )
+        val phaseProgressed = phaseIndex(candidatePhase.phase) > phaseIndex(state.subgoalState.phase)
+        val phaseRegressed = phaseIndex(candidatePhase.phase) < phaseIndex(state.subgoalState.phase)
+        val recentActionResult = classifyRecentActionResult(
+            resolution = resolution,
+            executionResult = executionResult,
+            observationChanged = observationChanged,
+            localChangeConfirmedPoint = localChangeConfirmedPoint
+        )
+        val recentNoProgress = when {
+            recentActionResult == RecentActionResult.NO_CHANGE -> true
+            recentActionResult == RecentActionResult.BLOCKED -> true
+            recentActionResult == RecentActionResult.WAIT -> true
+            recentActionResult == RecentActionResult.ASK_USER -> true
+            else -> false
+        }
+        val progress = observationChanged == true ||
+            localChangeConfirmedPoint != null ||
+            phaseProgressed
+        val consecutiveNoChangeCount = if (observationChanged == false) {
+            state.consecutiveNoChangeCount + 1
+        } else {
+            0
+        }
+        val lowYieldIncrement = recentNoProgress ||
+            recentActionResult == RecentActionResult.BLOCKED ||
+            recentActionResult == RecentActionResult.REJECTED
+        val consecutiveLowYieldCount = if (progress) {
+            0
+        } else if (lowYieldIncrement) {
+            state.consecutiveLowYieldCount + 1
+        } else {
+            state.consecutiveLowYieldCount
+        }
+        val goalRelation = inferGoalRelation(
+            command = command,
+            state = state,
+            candidatePhase = candidatePhase,
+            observationDelta = observationDelta,
+            resolution = resolution,
+            consecutiveLowYieldCount = consecutiveLowYieldCount,
+            phaseProgressed = phaseProgressed,
+            phaseRegressed = phaseRegressed,
+            surfaceContext = surfaceContext
+        )
+        return ProgressEvidence(
+            observationDelta = observationDelta,
+            surfaceContext = surfaceContext,
+            recentActionResult = recentActionResult,
+            recentActionCode = controlSyntheticCode ?: executionResult?.code ?: resolution.finalCanonicalAction.type.name,
+            recentActionMessage = controlSyntheticDetails
+                ?: executionResult?.details
+                ?: resolution.recoveryDecision.message
+                ?: resolution.finalCanonicalAction.reason
+                ?: resolution.finalCanonicalAction.question
+                ?: resolution.finalCanonicalAction.type.name.lowercase(),
+            consecutiveNoChangeCount = consecutiveNoChangeCount,
+            consecutiveLowYieldCount = consecutiveLowYieldCount,
+            recentLowYield = consecutiveLowYieldCount >= config.noChangeThreshold,
+            recentNoProgress = recentNoProgress,
+            recentBackIntent = resolution.proposedAction.type == CanonicalActionType.BACK ||
+                resolution.finalCanonicalAction.type == CanonicalActionType.BACK,
+            clickSuppressed = resolution.recoveryDecision.rule == "TOGGLE_REPEAT_CLICK_SUPPRESSED" ||
+                resolution.recoveryDecision.rule == "REPEAT_CLICK_NEARBY_BLOCK",
+            repeatTargetPoint = resolution.finalCanonicalAction.point ?: resolution.proposedAction.point,
+            phaseProgressed = phaseProgressed,
+            phaseRegressed = phaseRegressed,
+            goalRelation = goalRelation,
+            modelRequestedDone = resolution.proposedAction.type == CanonicalActionType.DONE
+        )
+    }
+
+    private fun inferGoalRelation(
+        command: String,
+        state: GuardrailState,
+        candidatePhase: SubgoalState,
+        observationDelta: ObservationDeltaEvidence,
+        resolution: ControlActionResolution,
+        consecutiveLowYieldCount: Int,
+        phaseProgressed: Boolean,
+        phaseRegressed: Boolean,
+        surfaceContext: SurfaceContext
+    ): GoalRelation {
+        val finalAction = resolution.finalCanonicalAction
+        val currentSurfaceMatchesTask = surfaceMatchesTask(command, surfaceContext)
+        val previousSurfaceMatchesTask = surfaceMatchesTask(command, state.lastSurfaceContext)
+        if (candidatePhase.phase == SubgoalPhase.DONE_ONLY) {
+            return GoalRelation.AT_TARGET
+        }
+        if (candidatePhase.phase == SubgoalPhase.TARGET_CLICKED_PENDING_SETTLE &&
+            finalAction.type == CanonicalActionType.CLICK &&
+            observationDelta.effectiveChanged == true
+        ) {
+            return GoalRelation.AT_TARGET
+        }
+        if (observationDelta.localRoiChanged &&
+            finalAction.type == CanonicalActionType.CLICK &&
+            candidatePhase.phase == state.subgoalState.phase
+        ) {
+            return GoalRelation.AT_TARGET
+        }
+        if (currentSurfaceMatchesTask &&
+            (observationDelta.surfaceChanged || phaseProgressed || observationDelta.effectiveChanged == true)
+        ) {
+            return GoalRelation.AT_TARGET
+        }
+        if (phaseProgressed || (currentSurfaceMatchesTask && observationDelta.surfaceChanged)) {
+            return GoalRelation.CLOSER
+        }
+        if ((phaseRegressed || (previousSurfaceMatchesTask && !currentSurfaceMatchesTask && observationDelta.surfaceChanged) ||
+                resolution.recoveryDecision.rule == "REPEAT_CLICK_NEARBY_BLOCK") &&
+            consecutiveLowYieldCount >= config.noChangeThreshold
+        ) {
+            return GoalRelation.OFF_TRACK
+        }
+        return GoalRelation.UNKNOWN
     }
 
     private fun buildResultSummary(
@@ -205,31 +362,15 @@ class AgentControlCoordinator(
         executionResult: ActionExecutionResult?,
         controlSyntheticCode: String?,
         controlSyntheticDetails: String?,
-        observationChanged: Boolean?,
-        completionVerdict: CompletionVerdict,
-        state: GuardrailState,
-        localChangeConfirmedPoint: CanonicalPoint?
+        progressEvidence: ProgressEvidence,
+        goalStatus: GoalSatisfactionStatus
     ): StepResultSummary {
-        if (resolution.guardrailDecision.wasBlocked()) {
-            return StepResultSummary(
-                category = when (resolution.finalCanonicalAction.type) {
-                    CanonicalActionType.ASK_USER -> StepResultCategory.LOW_YIELD_HANDOFF
-                    CanonicalActionType.DONE -> StepResultCategory.COMPLETION_SATISFIED
-                    else -> StepResultCategory.GUARDRAIL_BLOCKED
-                },
-                code = controlSyntheticCode ?: resolution.guardrailDecision.rule ?: "GUARDRAIL_BLOCKED",
-                message = controlSyntheticDetails ?: resolution.guardrailDecision.message.orEmpty(),
-                observationChanged = observationChanged,
-                lowYield = resolution.guardrailDecision.rule == "REPEAT_CLICK_NEARBY_BLOCK",
-                guardrailRule = resolution.guardrailDecision.rule
-            )
-        }
-        if (completionVerdict == CompletionVerdict.SATISFIED) {
+        if (goalStatus == GoalSatisfactionStatus.SATISFIED) {
             return StepResultSummary(
                 category = StepResultCategory.COMPLETION_SATISFIED,
                 code = controlSyntheticCode ?: executionResult?.code ?: "COMPLETION_SATISFIED",
-                message = controlSyntheticDetails ?: executionResult?.details ?: "completion satisfied",
-                observationChanged = observationChanged
+                message = controlSyntheticDetails ?: executionResult?.details ?: "goal satisfied",
+                observationChanged = progressEvidence.observationChanged
             )
         }
         executionResult?.let {
@@ -238,65 +379,73 @@ class AgentControlCoordinator(
                     category = StepResultCategory.PLATFORM_FAILED,
                     code = it.code,
                     message = it.details,
-                    observationChanged = observationChanged
+                    observationChanged = progressEvidence.observationChanged
                 )
             }
-            if (localChangeConfirmedPoint != null) {
-                return StepResultSummary(
-                    category = StepResultCategory.SUCCESS_CHANGED,
-                    code = "LOCAL_ROI_CHANGE_CONFIRMED",
-                    message = it.details,
-                    observationChanged = true
-                )
-            }
-            return if (observationChanged == false) {
-                val lowYield = state.consecutiveNoChangeCount + 1 >= config.noChangeThreshold
-                StepResultSummary(
-                    category = if (lowYield) StepResultCategory.LOW_YIELD_HANDOFF else StepResultCategory.SUCCESS_NO_CHANGE,
-                    code = it.code,
-                    message = it.details,
-                    observationChanged = false,
-                    lowYield = lowYield
-                )
-            } else {
-                StepResultSummary(
-                    category = StepResultCategory.SUCCESS_CHANGED,
-                    code = it.code,
-                    message = it.details,
-                    observationChanged = observationChanged
-                )
-            }
+        }
+        if (resolution.finalCanonicalAction.type == CanonicalActionType.ASK_USER ||
+            goalStatus == GoalSatisfactionStatus.NEED_USER
+        ) {
+            return StepResultSummary(
+                category = StepResultCategory.LOW_YIELD_HANDOFF,
+                code = controlSyntheticCode ?: "ASK_USER",
+                message = controlSyntheticDetails
+                    ?: resolution.finalCanonicalAction.question
+                    ?: "ask user",
+                observationChanged = progressEvidence.observationChanged,
+                lowYield = true,
+                guardrailRule = resolution.recoveryDecision.rule
+            )
         }
         if (resolution.finalCanonicalAction.type == CanonicalActionType.WAIT) {
             return StepResultSummary(
                 category = StepResultCategory.WAIT_ELAPSED,
                 code = controlSyntheticCode ?: "WAIT_ELAPSED",
                 message = controlSyntheticDetails ?: "wait elapsed",
-                observationChanged = observationChanged
-            )
-        }
-        if (resolution.finalCanonicalAction.type == CanonicalActionType.ASK_USER) {
-            return StepResultSummary(
-                category = StepResultCategory.LOW_YIELD_HANDOFF,
-                code = controlSyntheticCode ?: "ASK_USER",
-                message = controlSyntheticDetails ?: (resolution.finalCanonicalAction.question ?: "ask user"),
-                observationChanged = observationChanged,
-                lowYield = true
+                observationChanged = progressEvidence.observationChanged,
+                lowYield = progressEvidence.recentLowYield,
+                guardrailRule = resolution.recoveryDecision.rule
             )
         }
         if (resolution.finalCanonicalAction.type == CanonicalActionType.DONE) {
             return StepResultSummary(
                 category = StepResultCategory.SYNTHETIC_DONE,
                 code = controlSyntheticCode ?: "DONE",
-                message = controlSyntheticDetails ?: (resolution.finalCanonicalAction.reason ?: "done"),
-                observationChanged = observationChanged
+                message = controlSyntheticDetails
+                    ?: resolution.finalCanonicalAction.reason
+                    ?: "done",
+                observationChanged = progressEvidence.observationChanged,
+                guardrailRule = resolution.recoveryDecision.rule
+            )
+        }
+        if (resolution.recoveryDecision.wasOverridden()) {
+            return StepResultSummary(
+                category = StepResultCategory.GUARDRAIL_BLOCKED,
+                code = controlSyntheticCode ?: resolution.recoveryDecision.rule ?: "RECOVERY_OVERRIDE",
+                message = controlSyntheticDetails ?: resolution.recoveryDecision.message.orEmpty(),
+                observationChanged = progressEvidence.observationChanged,
+                lowYield = progressEvidence.recentLowYield,
+                guardrailRule = resolution.recoveryDecision.rule
+            )
+        }
+        if (progressEvidence.observationChanged == false) {
+            return StepResultSummary(
+                category = if (progressEvidence.recentLowYield) {
+                    StepResultCategory.LOW_YIELD_HANDOFF
+                } else {
+                    StepResultCategory.SUCCESS_NO_CHANGE
+                },
+                code = controlSyntheticCode ?: executionResult?.code ?: "NO_CHANGE",
+                message = controlSyntheticDetails ?: executionResult?.details ?: "no change",
+                observationChanged = false,
+                lowYield = progressEvidence.recentLowYield
             )
         }
         return StepResultSummary(
-            category = StepResultCategory.GUARDRAIL_BLOCKED,
-            code = controlSyntheticCode ?: "NO_RESULT",
-            message = controlSyntheticDetails ?: "no result",
-            observationChanged = observationChanged
+            category = StepResultCategory.SUCCESS_CHANGED,
+            code = controlSyntheticCode ?: executionResult?.code ?: "SUCCESS_CHANGED",
+            message = controlSyntheticDetails ?: executionResult?.details ?: "changed",
+            observationChanged = progressEvidence.observationChanged
         )
     }
 
@@ -305,41 +454,33 @@ class AgentControlCoordinator(
         step: Int,
         resolution: ControlActionResolution,
         resultSummary: StepResultSummary,
-        observationChanged: Boolean?,
         nextPhase: SubgoalState,
         afterObservation: ObservationResult?,
-        guardrailRule: String?,
+        progressEvidence: ProgressEvidence,
+        goalDecision: GoalSatisfactionDecision,
+        surfaceContext: SurfaceContext,
         localChangeConfirmedPoint: CanonicalPoint?
     ): GuardrailState {
-        val progress = observationChanged == true ||
-            resultSummary.category == StepResultCategory.COMPLETION_SATISFIED ||
-            previous.subgoalState.phase != nextPhase.phase
-        val nextFingerprint = afterObservation?.let { ObservationChangeDetector.fingerprint(it) } ?: previous.lastObservationFingerprint
-        val nextNoChange = if (observationChanged == false) {
-            previous.consecutiveNoChangeCount + 1
-        } else {
-            0
-        }
-        val lowYieldCategory = resultSummary.lowYield ||
-            resultSummary.category == StepResultCategory.GUARDRAIL_BLOCKED ||
-            resultSummary.category == StepResultCategory.LOW_YIELD_HANDOFF
-        val nextLowYield = if (progress) {
-            0
-        } else if (lowYieldCategory || observationChanged == false) {
-            previous.consecutiveLowYieldCount + 1
-        } else {
-            previous.consecutiveLowYieldCount
-        }
         val finalAction = resolution.finalCanonicalAction
+        val progress = progressEvidence.strongProgressSignal ||
+            goalDecision.status == GoalSatisfactionStatus.SATISFIED
+        val nextFingerprint = afterObservation?.let { ObservationChangeDetector.fingerprint(it) }
+            ?: previous.lastObservationFingerprint
         val nextClickRepeat = when {
             finalAction.type != CanonicalActionType.CLICK -> 0
             finalAction.point == null -> 0
             previous.lastClickPoint == null -> 1
-            !finalAction.point.isNear(previous.lastClickPoint, config.nearbyClickRadiusPx(afterObservation ?: ObservationResult.Failed("OBS", "n/a"))) -> 1
-            observationChanged == true -> 1
+            !finalAction.point.isNear(
+                previous.lastClickPoint,
+                config.nearbyClickRadiusPx(afterObservation ?: ObservationResult.Failed("OBS", "n/a"))
+            ) -> 1
+
+            progressEvidence.observationChanged == true -> 1
             else -> previous.nearbyRepeatClickCount + 1
         }
-        val nextBackHomeBlocks = if (guardrailRule?.contains("BACK") == true || guardrailRule?.contains("HOME") == true) {
+        val nextBackHomeBlocks = if (resolution.recoveryDecision.rule?.contains("BACK") == true ||
+            resolution.recoveryDecision.rule?.contains("HOME") == true
+        ) {
             previous.consecutiveBackHomeBlocks + 1
         } else if (progress) {
             0
@@ -355,11 +496,11 @@ class AgentControlCoordinator(
             localChangeConfirmedPoint != null -> localChangeConfirmedPoint
             finalAction.type == CanonicalActionType.CLICK &&
                 finalAction.point != null &&
-                observationChanged == true &&
+                progressEvidence.observationChanged == true &&
                 previous.subgoalState.phase == nextPhase.phase ->
                 finalAction.point
 
-            guardrailRule == "TOGGLE_REPEAT_CLICK_SUPPRESSED" ->
+            resolution.recoveryDecision.rule == "TOGGLE_REPEAT_CLICK_SUPPRESSED" ->
                 previous.lastLocallyConfirmedClickPoint
 
             else -> null
@@ -381,9 +522,9 @@ class AgentControlCoordinator(
             approxPoint = finalAction.point ?: finalAction.points.firstOrNull(),
             resultCategory = resultSummary.categoryName(),
             summary = resultSummary.message,
-            guardrailRule = guardrailRule,
-            guardrailDecision = if (guardrailRule == null) "ALLOW" else "BLOCKED",
-            pageChanged = observationChanged,
+            guardrailRule = resolution.recoveryDecision.rule,
+            guardrailDecision = resolution.recoveryDecision.type.name,
+            pageChanged = progressEvidence.observationChanged,
             phaseBefore = previous.subgoalState.phase.name,
             phaseAfter = nextPhase.phase.name,
             platformCode = resultSummary.code
@@ -392,32 +533,147 @@ class AgentControlCoordinator(
             subgoalState = nextPhase,
             lastObservationFingerprint = nextFingerprint,
             lastResult = resultSummary,
+            lastSurfaceContext = surfaceContext,
             lastProgressStep = if (progress) step else previous.lastProgressStep,
-            consecutiveNoChangeCount = nextNoChange,
-            consecutiveLowYieldCount = nextLowYield,
+            consecutiveNoChangeCount = progressEvidence.consecutiveNoChangeCount,
+            consecutiveLowYieldCount = progressEvidence.consecutiveLowYieldCount,
             consecutiveBackHomeBlocks = nextBackHomeBlocks,
             lastClickPoint = nextPoint,
             nearbyRepeatClickCount = nextClickRepeat,
             lastLocallyConfirmedClickPoint = nextLocallyConfirmedClickPoint,
             lastLocallyConfirmedClickStep = nextLocallyConfirmedClickStep,
-            completionVerdict = if (nextPhase.phase == SubgoalPhase.DONE_ONLY) {
-                CompletionVerdict.SATISFIED
-            } else {
+            lastGoalStatus = goalDecision.status,
+            lastGoalReason = goalDecision.reason
+        ).append(record, config.maxRecentSteps)
+    }
+
+    private fun classifyRecentActionResult(
+        resolution: ControlActionResolution,
+        executionResult: ActionExecutionResult?,
+        observationChanged: Boolean?,
+        localChangeConfirmedPoint: CanonicalPoint?
+    ): RecentActionResult {
+        if (executionResult?.ok == false) {
+            return RecentActionResult.PLATFORM_FAILED
+        }
+        return when (resolution.finalCanonicalAction.type) {
+            CanonicalActionType.ASK_USER -> RecentActionResult.ASK_USER
+            CanonicalActionType.DONE -> RecentActionResult.DONE
+            CanonicalActionType.WAIT -> RecentActionResult.WAIT
+            else -> {
                 when {
-                    resultSummary.category == StepResultCategory.COMPLETION_SATISFIED -> CompletionVerdict.SATISFIED
-                    resultSummary.category == StepResultCategory.SYNTHETIC_DONE -> CompletionVerdict.UNSURE
-                    else -> CompletionVerdict.NOT_SATISFIED
+                    resolution.recoveryDecision.wasOverridden() &&
+                        resolution.finalCanonicalAction.type != CanonicalActionType.BACK ->
+                        RecentActionResult.BLOCKED
+
+                    localChangeConfirmedPoint != null || observationChanged == true ->
+                        RecentActionResult.SUCCESS
+
+                    executionResult?.ok == true ->
+                        RecentActionResult.NO_CHANGE
+
+                    else -> RecentActionResult.REJECTED
                 }
             }
-        ).append(record, config.maxRecentSteps)
+        }
+    }
+
+    private fun stateFor(sessionId: String, command: String): GuardrailState {
+        return states.computeIfAbsent(sessionId) {
+            GuardrailState(subgoalState = subgoalStateMachine.initialState(command))
+        }
     }
 
     private fun detectObservationChange(
         beforeObservation: ObservationResult,
-        afterObservation: ObservationResult?
+        afterObservation: ObservationResult?,
+        localChangeConfirmedPoint: CanonicalPoint?
     ): Boolean? {
+        if (localChangeConfirmedPoint != null) {
+            return true
+        }
         val before = beforeObservation as? ObservationResult.Captured ?: return null
         val after = afterObservation as? ObservationResult.Captured ?: return null
         return !ObservationChangeDetector.areNearlyUnchanged(before, after)
+    }
+
+    private fun phaseIndex(phase: SubgoalPhase): Int {
+        return when (phase) {
+            SubgoalPhase.GENERAL_NAVIGATION -> 0
+            SubgoalPhase.NEED_OPEN_PARENT -> 1
+            SubgoalPhase.NEED_CLICK_TARGET -> 2
+            SubgoalPhase.TARGET_CLICKED_PENDING_SETTLE -> 3
+            SubgoalPhase.DONE_ONLY -> 4
+        }
+    }
+
+    private fun surfaceMatchesTask(command: String, surfaceContext: SurfaceContext): Boolean {
+        val commandTokens = command.lowercase()
+            .replace(Regex("[^a-z0-9._/]+"), " ")
+            .split(' ', '.', '/', '_')
+            .map { it.trim() }
+            .filter { it.length >= 2 }
+            .toSet()
+        if (commandTokens.isEmpty()) {
+            return false
+        }
+        return surfaceContext.normalizedTokens().any { it in commandTokens }
+    }
+
+    private fun logEvidence(sessionId: String, step: Int, evidence: ProgressEvidence) {
+        AgentHostLog.i(
+            TAG,
+            "event=decision_kernel sessionId=$sessionId step=$step code=EVIDENCE_UPDATED " +
+                "globalChanged=${evidence.observationDelta.globalChanged} " +
+                "localRoiChanged=${evidence.observationDelta.localRoiChanged} " +
+                "surfaceChanged=${evidence.observationDelta.surfaceChanged} " +
+                "recentActionResult=${evidence.recentActionResult.name} " +
+                "goalRelation=${evidence.goalRelation.name} " +
+                "lowYield=${evidence.recentLowYield}"
+        )
+    }
+
+    private fun logGoal(sessionId: String, step: Int, decision: GoalSatisfactionDecision) {
+        val code = when (decision.status) {
+            GoalSatisfactionStatus.SATISFIED -> "GOAL_SATISFIED"
+            GoalSatisfactionStatus.UNSURE -> "GOAL_UNSURE"
+            GoalSatisfactionStatus.OFF_TRACK -> "GOAL_OFF_TRACK"
+            GoalSatisfactionStatus.NEED_USER -> "GOAL_UNSURE"
+        }
+        AgentHostLog.i(
+            TAG,
+            "event=decision_kernel sessionId=$sessionId step=$step code=$code " +
+                "status=${decision.status.name} reason=${decision.reason}"
+        )
+    }
+
+    private fun logRecovery(
+        sessionId: String,
+        step: Int,
+        proposedAction: CanonicalAction,
+        decision: RecoveryPolicyDecision
+    ) {
+        val recoveryCode = when (decision.rule) {
+            "RECOVERY_BACK_ALLOWED" -> "RECOVERY_BACK_ALLOWED"
+            "BACK_RECENT_PROGRESS_BLOCK" -> "RECOVERY_BACK_BLOCKED"
+            "REPEAT_CLICK_NEARBY_BLOCK",
+            "TOGGLE_REPEAT_CLICK_SUPPRESSED" -> "RECOVERY_WAIT_CHOSEN"
+
+            else -> null
+        }
+        recoveryCode?.let { code ->
+            AgentHostLog.i(
+                TAG,
+                "event=decision_kernel sessionId=$sessionId step=$step code=$code " +
+                    "proposedAction=${proposedAction.type.name} finalAction=${decision.finalCanonicalAction.type.name} " +
+                    "rule=${decision.rule}"
+            )
+        }
+        AgentHostLog.i(
+            TAG,
+            "event=decision_kernel sessionId=$sessionId step=$step code=CONTROL_DECISION_EMITTED " +
+                "proposedAction=${proposedAction.type.name} finalAction=${decision.finalCanonicalAction.type.name} " +
+                "directive=${decision.directive} rule=${decision.rule ?: "NONE"}"
+        )
     }
 }

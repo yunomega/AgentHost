@@ -60,6 +60,14 @@ interface ExecutionDisplayPolicyGateway {
         sessionId: String,
         reason: String
     ): ExecutionDisplayPolicyResponse
+
+    fun startExecutionDisplayStartupTarget(
+        sessionId: String,
+        executionDisplayId: Int,
+        startupMode: String,
+        componentName: String?,
+        reason: String
+    ): ExecutionDisplayStartupResponse
 }
 
 data class PlatformCaptureResponse(
@@ -83,6 +91,23 @@ data class ExecutionDisplayPolicyResponse(
     val details: String
 )
 
+data class ExecutionDisplayStartupResponse(
+    val ok: Boolean,
+    val code: String,
+    val details: String,
+    val requestedDisplayId: Int = -1,
+    val boundDisplayId: Int = -1,
+    val taskId: Int = -1,
+    val topActivity: String? = null,
+    val topPackage: String? = null,
+    val resolvedComponent: String? = null
+)
+
+object ExecutionDisplayStartupMode {
+    const val SECONDARY_HOME = "SECONDARY_HOME"
+    const val EXPLICIT_COMPONENT_ON_DISPLAY = "EXPLICIT_COMPONENT_ON_DISPLAY"
+}
+
 object PlatformResultCodes {
     const val OK = "OK"
     const val DISPLAY_NOT_FOUND = "DISPLAY_NOT_FOUND"
@@ -99,6 +124,13 @@ private object PlatformBundleKeys {
     const val WIDTH = "width"
     const val HEIGHT = "height"
     const val PNG_FD = "png_fd"
+    const val TASK_ID = "taskId"
+    const val TOP_ACTIVITY = "topActivity"
+    const val TOP_PACKAGE = "topPackage"
+    const val REQUESTED_DISPLAY_ID = "requestedDisplayId"
+    const val BOUND_DISPLAY_ID = "boundDisplayId"
+    const val DISPLAY_ID = "displayId"
+    const val RESOLVED_COMPONENT = "resolvedComponent"
 }
 
 class AgentHostPlatformClient(
@@ -280,6 +312,63 @@ class AgentHostPlatformClient(
             )
         } catch (t: Throwable) {
             exceptionPolicy(sessionId, -1, "CLEAR_EXECUTION_DISPLAY_SESSION", t)
+        }
+    }
+
+    override fun startExecutionDisplayStartupTarget(
+        sessionId: String,
+        executionDisplayId: Int,
+        startupMode: String,
+        componentName: String?,
+        reason: String
+    ): ExecutionDisplayStartupResponse {
+        val safeComponentName = componentName ?: ""
+        logPolicyBegin(
+            sessionId = sessionId,
+            executionDisplayId = executionDisplayId,
+            actionType = "START_EXECUTION_DISPLAY_STARTUP_TARGET",
+            extras = "startupMode=$startupMode componentName=$safeComponentName reason=$reason"
+        )
+        val service = resolveService() ?: return unavailableStartup(
+            sessionId = sessionId,
+            executionDisplayId = executionDisplayId,
+            actionType = "START_EXECUTION_DISPLAY_STARTUP_TARGET"
+        )
+        return try {
+            toExecutionDisplayStartupResponse(
+                sessionId = sessionId,
+                executionDisplayId = executionDisplayId,
+                actionType = "START_EXECUTION_DISPLAY_STARTUP_TARGET",
+                result = callWithTimeout(
+                    sessionId = sessionId,
+                    displayId = executionDisplayId,
+                    actionType = "START_EXECUTION_DISPLAY_STARTUP_TARGET",
+                    timeoutMs = actionTimeoutMs + 4_000L
+                ) {
+                    service.startExecutionDisplayStartupTarget(
+                        sessionId,
+                        executionDisplayId,
+                        startupMode,
+                        safeComponentName,
+                        reason
+                    )
+                }
+            )
+        } catch (_: TimeoutException) {
+            failureStartup(
+                sessionId = sessionId,
+                executionDisplayId = executionDisplayId,
+                actionType = "START_EXECUTION_DISPLAY_STARTUP_TARGET",
+                code = PlatformResultCodes.INTERNAL_ERROR,
+                details = "platform call timeout after ${actionTimeoutMs + 4_000L}ms"
+            )
+        } catch (t: Throwable) {
+            exceptionStartup(
+                sessionId = sessionId,
+                executionDisplayId = executionDisplayId,
+                actionType = "START_EXECUTION_DISPLAY_STARTUP_TARGET",
+                error = t
+            )
         }
     }
 
@@ -564,6 +653,69 @@ class AgentHostPlatformClient(
         return ExecutionDisplayPolicyResponse(ok = true, code = code, details = details)
     }
 
+    private fun toExecutionDisplayStartupResponse(
+        sessionId: String,
+        executionDisplayId: Int,
+        actionType: String,
+        result: Bundle?
+    ): ExecutionDisplayStartupResponse {
+        if (result == null) {
+            return failureStartup(
+                sessionId = sessionId,
+                executionDisplayId = executionDisplayId,
+                actionType = actionType,
+                code = PlatformResultCodes.INTERNAL_ERROR,
+                details = "null bundle"
+            )
+        }
+        val code = result.getString(PlatformBundleKeys.CODE).orEmpty()
+            .ifEmpty { PlatformResultCodes.INTERNAL_ERROR }
+        val details = result.getString(PlatformBundleKeys.DETAILS).orEmpty()
+            .ifEmpty { "no details" }
+        val requestedDisplayId = result.getInt(
+            PlatformBundleKeys.REQUESTED_DISPLAY_ID,
+            result.getInt(PlatformBundleKeys.DISPLAY_ID, executionDisplayId)
+        )
+        val boundDisplayId = result.getInt(PlatformBundleKeys.BOUND_DISPLAY_ID, -1)
+        val taskId = result.getInt(PlatformBundleKeys.TASK_ID, -1)
+        val topActivity = result.getString(PlatformBundleKeys.TOP_ACTIVITY)
+        val topPackage = result.getString(PlatformBundleKeys.TOP_PACKAGE)
+        val resolvedComponent = result.getString(PlatformBundleKeys.RESOLVED_COMPONENT)
+        if (code != "EXECUTION_DISPLAY_STARTUP_OK") {
+            return failureStartup(
+                sessionId = sessionId,
+                executionDisplayId = requestedDisplayId,
+                actionType = actionType,
+                code = code,
+                details = details,
+                requestedDisplayId = requestedDisplayId,
+                boundDisplayId = boundDisplayId,
+                taskId = taskId,
+                topActivity = topActivity,
+                topPackage = topPackage,
+                resolvedComponent = resolvedComponent
+            )
+        }
+        logPolicySuccess(
+            sessionId,
+            requestedDisplayId,
+            actionType,
+            "details=$details code=$code requestedDisplayId=$requestedDisplayId " +
+                "boundDisplayId=$boundDisplayId taskId=$taskId resolvedComponent=$resolvedComponent"
+        )
+        return ExecutionDisplayStartupResponse(
+            ok = true,
+            code = code,
+            details = details,
+            requestedDisplayId = requestedDisplayId,
+            boundDisplayId = boundDisplayId,
+            taskId = taskId,
+            topActivity = topActivity,
+            topPackage = topPackage,
+            resolvedComponent = resolvedComponent
+        )
+    }
+
     private fun unavailableCapture(
         sessionId: String,
         displayId: Int,
@@ -598,6 +750,20 @@ class AgentHostPlatformClient(
         actionType: String
     ): ExecutionDisplayPolicyResponse {
         return failurePolicy(
+            sessionId = sessionId,
+            executionDisplayId = executionDisplayId,
+            actionType = actionType,
+            code = PlatformResultCodes.UNSUPPORTED,
+            details = "agenthost_platform service unavailable"
+        )
+    }
+
+    private fun unavailableStartup(
+        sessionId: String,
+        executionDisplayId: Int,
+        actionType: String
+    ): ExecutionDisplayStartupResponse {
+        return failureStartup(
             sessionId = sessionId,
             executionDisplayId = executionDisplayId,
             actionType = actionType,
@@ -642,6 +808,21 @@ class AgentHostPlatformClient(
         )
     }
 
+    private fun exceptionStartup(
+        sessionId: String,
+        executionDisplayId: Int,
+        actionType: String,
+        error: Throwable
+    ): ExecutionDisplayStartupResponse {
+        return failureStartup(
+            sessionId = sessionId,
+            executionDisplayId = executionDisplayId,
+            actionType = actionType,
+            code = PlatformResultCodes.INTERNAL_ERROR,
+            details = error.message ?: error.javaClass.simpleName
+        )
+    }
+
     private fun failureCapture(
         sessionId: String,
         displayId: Int,
@@ -673,6 +854,33 @@ class AgentHostPlatformClient(
     ): ExecutionDisplayPolicyResponse {
         logPolicyFailed(sessionId, executionDisplayId, actionType, code, details)
         return ExecutionDisplayPolicyResponse(ok = false, code = code, details = details)
+    }
+
+    private fun failureStartup(
+        sessionId: String,
+        executionDisplayId: Int,
+        actionType: String,
+        code: String,
+        details: String,
+        requestedDisplayId: Int = executionDisplayId,
+        boundDisplayId: Int = -1,
+        taskId: Int = -1,
+        topActivity: String? = null,
+        topPackage: String? = null,
+        resolvedComponent: String? = null
+    ): ExecutionDisplayStartupResponse {
+        logPolicyFailed(sessionId, executionDisplayId, actionType, code, details)
+        return ExecutionDisplayStartupResponse(
+            ok = false,
+            code = code,
+            details = details,
+            requestedDisplayId = requestedDisplayId,
+            boundDisplayId = boundDisplayId,
+            taskId = taskId,
+            topActivity = topActivity,
+            topPackage = topPackage,
+            resolvedComponent = resolvedComponent
+        )
     }
 
     private fun readBytesWithTimeout(

@@ -238,7 +238,9 @@ object TaskRunReportHooks {
                 currentVisibleDisplayId = state?.currentVisibleDisplayId,
                 lastMigrationDirection = state?.lastMigrationDirection,
                 lastMigrationCode = state?.lastMigrationCode,
-                lastError = state?.lastError
+                lastError = state?.lastError,
+                bootstrapComponent = state?.bootstrapComponent,
+                lastResolvedBootstrapComponent = state?.lastResolvedBootstrapComponent
             )
         }
     }
@@ -532,7 +534,10 @@ object TaskRunReportHooks {
                         finalSnapshot?.lastError != null -> finalSnapshot.lastError
                         finalOutcome == "failed" -> finalCode
                         else -> null
-                    }
+                    },
+                    bootstrapComponent = finalSnapshot?.bootstrapComponent,
+                    lastResolvedBootstrapComponent =
+                        finalSnapshot?.lastResolvedBootstrapComponent
                 )
             }
             run.steps.values.forEach { step ->

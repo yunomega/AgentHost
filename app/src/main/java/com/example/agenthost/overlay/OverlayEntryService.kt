@@ -10,6 +10,7 @@ import android.os.Build
 import android.os.Looper
 import android.util.Log
 import androidx.core.app.ServiceCompat
+import com.example.agenthost.config.PlannerConfig
 import com.example.agenthost.core.AgentHostRuntime
 import com.example.agenthost.debug.TaskRunReportHooks
 import com.example.agenthost.session.SessionCoordinator
@@ -194,10 +195,7 @@ class OverlayEntryService : Service() {
         TaskRunReportHooks.prepareNextSessionSource("OVERLAY")
         val startResult = coordinator.startSession(
             command,
-            SessionStartOptions(
-                bootstrapTarget = SessionBootstrapTarget.SETTINGS,
-                plannerConfigOverride = plannerConfig
-            )
+            overlaySessionStartOptions(plannerConfig)
         )
         if (!startResult.ok) {
             return startResult
@@ -252,4 +250,14 @@ class OverlayEntryService : Service() {
     private fun sessionCoordinator(): SessionCoordinator {
         return AgentHostRuntime.sessionCoordinator(applicationContext)
     }
+}
+
+internal fun overlaySessionStartOptions(
+    plannerConfig: PlannerConfig,
+    bootstrapTarget: SessionBootstrapTarget = SessionBootstrapTarget.SECONDARY_HOME
+): SessionStartOptions {
+    return SessionStartOptions(
+        bootstrapTarget = bootstrapTarget,
+        plannerConfigOverride = plannerConfig
+    )
 }

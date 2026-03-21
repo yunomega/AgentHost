@@ -56,6 +56,7 @@ data class GuardrailState(
     val recentSteps: ArrayDeque<ControlStepRecord> = ArrayDeque(),
     val lastObservationFingerprint: ObservationFingerprint? = null,
     val lastResult: StepResultSummary? = null,
+    val lastSurfaceContext: SurfaceContext = SurfaceContext(),
     val lastProgressStep: Int? = null,
     val consecutiveNoChangeCount: Int = 0,
     val consecutiveLowYieldCount: Int = 0,
@@ -64,7 +65,8 @@ data class GuardrailState(
     val nearbyRepeatClickCount: Int = 0,
     val lastLocallyConfirmedClickPoint: CanonicalPoint? = null,
     val lastLocallyConfirmedClickStep: Int? = null,
-    val completionVerdict: CompletionVerdict = CompletionVerdict.NOT_SATISFIED
+    val lastGoalStatus: GoalSatisfactionStatus = GoalSatisfactionStatus.UNSURE,
+    val lastGoalReason: String? = null
 ) {
     fun append(record: ControlStepRecord, maxRecentSteps: Int): GuardrailState {
         val updated = ArrayDeque(recentSteps)

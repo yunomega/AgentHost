@@ -85,9 +85,9 @@ class SubgoalStateMachine {
 
     fun finalizePhase(
         candidateState: SubgoalState,
-        completionVerdict: CompletionVerdict
+        goalStatus: GoalSatisfactionStatus
     ): SubgoalState {
-        return if (completionVerdict == CompletionVerdict.SATISFIED) {
+        return if (goalStatus == GoalSatisfactionStatus.SATISFIED) {
             candidateState.copy(phase = SubgoalPhase.DONE_ONLY)
         } else {
             candidateState
@@ -98,14 +98,14 @@ class SubgoalStateMachine {
         state: SubgoalState,
         action: CanonicalAction,
         observationChanged: Boolean?,
-        completionVerdict: CompletionVerdict
+        goalStatus: GoalSatisfactionStatus
     ): SubgoalState {
         val candidateState = advancePhase(
             state = state,
             action = action,
             observationChanged = observationChanged
         )
-        return finalizePhase(candidateState, completionVerdict)
+        return finalizePhase(candidateState, goalStatus)
     }
 
     fun allowedActions(

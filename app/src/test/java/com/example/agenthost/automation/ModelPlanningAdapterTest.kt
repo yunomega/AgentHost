@@ -294,7 +294,7 @@ class ModelPlanningAdapterTest {
         allowedActions: List<String>,
         blockedActions: List<String>,
         doneOnly: Boolean = false,
-        completionState: String = "NOT_SATISFIED"
+        completionState: String = "UNSURE"
     ): AgentControlSnapshot {
         return AgentControlSnapshot(
             globalTask = "点击一次应用选项，点开后再点击一次语燕输入法",

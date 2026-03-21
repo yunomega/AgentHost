@@ -1,64 +1,94 @@
 package com.example.agenthost.automation
 
-enum class GuardrailDecisionType {
-    ALLOW,
-    BLOCK_REPLACE,
-    BLOCK_TERMINAL
+enum class RecoveryDecisionType {
+    EXECUTE_PROPOSED,
+    OVERRIDE
 }
 
-data class GuardrailDecision(
-    val type: GuardrailDecisionType,
+data class RecoveryPolicyDecision(
+    val type: RecoveryDecisionType,
+    val directive: String,
     val finalAction: GuiAction,
     val finalCanonicalAction: CanonicalAction,
     val rule: String? = null,
     val message: String? = null
 ) {
-    fun wasBlocked(): Boolean = type != GuardrailDecisionType.ALLOW
+    fun wasOverridden(): Boolean = type != RecoveryDecisionType.EXECUTE_PROPOSED
 }
 
-class GuardrailEvaluator(
-    private val config: GuardrailConfig = GuardrailConfig()
-) {
-    fun evaluatePreExecution(
-        step: Int,
+data class RecoveryPolicyInput(
+    val step: Int,
+    val state: GuardrailState,
+    val beforeObservation: ObservationResult,
+    val proposedAction: CanonicalAction,
+    val goalStatus: GoalSatisfactionStatus,
+    val surfaceContext: SurfaceContext
+)
+
+data class RecoveryActionConstraints(
+    val allowedActions: List<String>,
+    val blockedActions: List<String>
+)
+
+interface RecoveryPolicy {
+    fun decide(input: RecoveryPolicyInput): RecoveryPolicyDecision
+
+    fun refineActionConstraints(
         state: GuardrailState,
-        beforeObservation: ObservationResult,
-        action: CanonicalAction
-    ): GuardrailDecision {
-        if (state.subgoalState.phase == SubgoalPhase.DONE_ONLY &&
+        capabilityProfile: CapabilityProfile,
+        baseAllowedActions: List<String>
+    ): RecoveryActionConstraints
+}
+
+class DefaultRecoveryPolicy(
+    private val config: GuardrailConfig = GuardrailConfig()
+) : RecoveryPolicy {
+    override fun decide(input: RecoveryPolicyInput): RecoveryPolicyDecision {
+        val action = input.proposedAction
+
+        if (input.goalStatus == GoalSatisfactionStatus.SATISFIED &&
             action.type != CanonicalActionType.DONE &&
             action.type != CanonicalActionType.ASK_USER
         ) {
-            val done = GuiAction.Done("post_target_gate")
-            return GuardrailDecision(
-                type = GuardrailDecisionType.BLOCK_TERMINAL,
+            val done = GuiAction.Done("goal_already_satisfied")
+            return RecoveryPolicyDecision(
+                type = RecoveryDecisionType.OVERRIDE,
+                directive = "DONE",
                 finalAction = done,
                 finalCanonicalAction = done.toCanonicalAction(sourceMode = action.sourceMode),
-                rule = "POST_TARGET_GATE",
-                message = "phase=DONE_ONLY only allows DONE or ASK_USER"
+                rule = "GOAL_ALREADY_SATISFIED",
+                message = "local evidence already satisfies the goal"
             )
         }
 
-        if (action.type == CanonicalActionType.BACK && state.isRecentProgress(step, config.recentProgressBackBlockWindow)) {
-            val replacement = GuiAction.Wait(500L)
-            return GuardrailDecision(
-                type = GuardrailDecisionType.BLOCK_REPLACE,
-                finalAction = replacement,
-                finalCanonicalAction = replacement.toCanonicalAction(sourceMode = action.sourceMode),
+        if (action.type == CanonicalActionType.BACK &&
+            input.state.isRecentProgress(input.step, config.recentProgressBackBlockWindow)
+        ) {
+            return waitDecision(
+                action = action,
                 rule = "BACK_RECENT_PROGRESS_BLOCK",
                 message = "recent progress observed; BACK is blocked"
             )
         }
 
-        if (action.type == CanonicalActionType.HOME &&
-            state.consecutiveLowYieldCount < config.noChangeThreshold &&
-            state.consecutiveBackHomeBlocks < config.backHomeBlockEscalationThreshold
-        ) {
-            val replacement = GuiAction.AskUser("当前没有明确卡死证据，是否需要返回主屏？")
-            return GuardrailDecision(
-                type = GuardrailDecisionType.BLOCK_REPLACE,
-                finalAction = replacement,
-                finalCanonicalAction = replacement.toCanonicalAction(sourceMode = action.sourceMode),
+        if (shouldAllowRecoveryBack(input)) {
+            return RecoveryPolicyDecision(
+                type = RecoveryDecisionType.OVERRIDE,
+                directive = "BACK",
+                finalAction = GuiAction.Back,
+                finalCanonicalAction = GuiAction.Back.toCanonicalAction(sourceMode = action.sourceMode),
+                rule = "RECOVERY_BACK_ALLOWED",
+                message = "off track with sustained low yield; recovery BACK is allowed"
+            )
+        }
+
+        if (action.type == CanonicalActionType.HOME && !hasRecoveryEvidence(input.state)) {
+            val ask = GuiAction.AskUser("当前没有明确卡死证据，是否需要返回主屏？")
+            return RecoveryPolicyDecision(
+                type = RecoveryDecisionType.OVERRIDE,
+                directive = "ASK_USER",
+                finalAction = ask,
+                finalCanonicalAction = ask.toCanonicalAction(sourceMode = action.sourceMode),
                 rule = "HOME_REQUIRES_RECOVERY_EVIDENCE",
                 message = "HOME is blocked without low-yield or recovery evidence"
             )
@@ -66,22 +96,19 @@ class GuardrailEvaluator(
 
         if (action.type == CanonicalActionType.CLICK) {
             val currentPoint = action.point
-            val previousPoint = state.lastClickPoint
-            val radius = config.nearbyClickRadiusPx(beforeObservation)
-            val repeatCount = state.nearbyRepeatClickCount
-            val lastLocalSuccessPoint = state.lastLocallyConfirmedClickPoint
-            val lastLocalSuccessStep = state.lastLocallyConfirmedClickStep
+            val previousPoint = input.state.lastClickPoint
+            val radius = config.nearbyClickRadiusPx(input.beforeObservation)
+            val lastLocalSuccessPoint = input.state.lastLocallyConfirmedClickPoint
+            val lastLocalSuccessStep = input.state.lastLocallyConfirmedClickStep
             if (currentPoint != null &&
                 lastLocalSuccessPoint != null &&
                 lastLocalSuccessStep != null &&
-                step - lastLocalSuccessStep <= config.toggleRepeatSuppressionWindow &&
+                input.step - lastLocalSuccessStep <= config.toggleRepeatSuppressionWindow &&
                 currentPoint.isNear(lastLocalSuccessPoint, radius)
             ) {
-                val replacement = GuiAction.Wait(250L)
-                return GuardrailDecision(
-                    type = GuardrailDecisionType.BLOCK_REPLACE,
-                    finalAction = replacement,
-                    finalCanonicalAction = replacement.toCanonicalAction(sourceMode = action.sourceMode),
+                return waitDecision(
+                    action = action,
+                    durationMs = 250L,
                     rule = "TOGGLE_REPEAT_CLICK_SUPPRESSED",
                     message = "recent local ROI confirmation near click point"
                 )
@@ -89,28 +116,131 @@ class GuardrailEvaluator(
             if (currentPoint != null &&
                 previousPoint != null &&
                 currentPoint.isNear(previousPoint, radius) &&
-                repeatCount >= config.repeatClickBlockThreshold - 1
+                input.state.nearbyRepeatClickCount >= config.repeatClickBlockThreshold - 1
             ) {
-                val replacement = if (state.consecutiveLowYieldCount + 1 >= config.lowYieldFuseThreshold) {
-                    GuiAction.AskUser("连续点击没有推进，当前需要你接手确认下一步。")
+                val nextLowYield = input.state.consecutiveLowYieldCount + 1
+                return if (nextLowYield >= config.lowYieldFuseThreshold) {
+                    val ask = GuiAction.AskUser("连续点击没有推进，当前需要你接手确认下一步。")
+                    RecoveryPolicyDecision(
+                        type = RecoveryDecisionType.OVERRIDE,
+                        directive = "ASK_USER",
+                        finalAction = ask,
+                        finalCanonicalAction = ask.toCanonicalAction(sourceMode = action.sourceMode),
+                        rule = "REPEAT_CLICK_NEARBY_BLOCK",
+                        message = "nearby click repeated without progress"
+                    )
                 } else {
-                    GuiAction.Wait(500L)
+                    waitDecision(
+                        action = action,
+                        rule = "REPEAT_CLICK_NEARBY_BLOCK",
+                        message = "nearby click repeated without progress"
+                    )
                 }
-                return GuardrailDecision(
-                    type = GuardrailDecisionType.BLOCK_REPLACE,
-                    finalAction = replacement,
-                    finalCanonicalAction = replacement.toCanonicalAction(sourceMode = action.sourceMode),
-                    rule = "REPEAT_CLICK_NEARBY_BLOCK",
-                    message = "nearby click repeated without progress"
-                )
             }
         }
 
-        return GuardrailDecision(
-            type = GuardrailDecisionType.ALLOW,
+        return RecoveryPolicyDecision(
+            type = RecoveryDecisionType.EXECUTE_PROPOSED,
+            directive = "EXECUTE_PROPOSED",
             finalAction = action.toGuiAction(),
             finalCanonicalAction = action
         )
+    }
+
+    override fun refineActionConstraints(
+        state: GuardrailState,
+        capabilityProfile: CapabilityProfile,
+        baseAllowedActions: List<String>
+    ): RecoveryActionConstraints {
+        val supported = capabilityProfile.supportedActions().toSet()
+        val allowed = baseAllowedActions.toMutableSet()
+
+        when (state.lastGoalStatus) {
+            GoalSatisfactionStatus.SATISFIED -> {
+                allowed.retainAll(setOf("DONE", "ASK_USER"))
+            }
+
+            GoalSatisfactionStatus.NEED_USER -> {
+                allowed.add("ASK_USER")
+            }
+
+            else -> Unit
+        }
+
+        if (shouldAllowRecoveryBackPreview(state)) {
+            if ("BACK" in supported) {
+                allowed.add("BACK")
+            }
+        } else if (state.subgoalState.phase == SubgoalPhase.NEED_OPEN_PARENT ||
+            state.subgoalState.phase == SubgoalPhase.NEED_CLICK_TARGET
+        ) {
+            allowed.remove("BACK")
+        }
+
+        if (!hasRecoveryEvidence(state)) {
+            allowed.remove("HOME")
+        }
+
+        val normalizedAllowed = allowed.filter { it in supported }.sorted()
+        return RecoveryActionConstraints(
+            allowedActions = normalizedAllowed,
+            blockedActions = supported.minus(normalizedAllowed.toSet()).toList().sorted()
+        )
+    }
+
+    private fun waitDecision(
+        action: CanonicalAction,
+        durationMs: Long = 500L,
+        rule: String,
+        message: String
+    ): RecoveryPolicyDecision {
+        val wait = GuiAction.Wait(durationMs)
+        return RecoveryPolicyDecision(
+            type = RecoveryDecisionType.OVERRIDE,
+            directive = "WAIT",
+            finalAction = wait,
+            finalCanonicalAction = wait.toCanonicalAction(sourceMode = action.sourceMode),
+            rule = rule,
+            message = message
+        )
+    }
+
+    private fun hasRecoveryEvidence(state: GuardrailState): Boolean {
+        return state.consecutiveLowYieldCount >= config.noChangeThreshold ||
+            state.consecutiveBackHomeBlocks >= config.backHomeBlockEscalationThreshold
+    }
+
+    private fun shouldAllowRecoveryBack(input: RecoveryPolicyInput): Boolean {
+        if (input.goalStatus != GoalSatisfactionStatus.OFF_TRACK) {
+            return false
+        }
+        if (input.state.consecutiveLowYieldCount < config.noChangeThreshold) {
+            return false
+        }
+        if (input.state.isRecentProgress(input.step, config.recentProgressBackBlockWindow)) {
+            return false
+        }
+        val lastFinalAction = input.state.recentSteps.lastOrNull()?.finalActionType
+        if (lastFinalAction == "BACK" || lastFinalAction == "HOME") {
+            return false
+        }
+        if (input.proposedAction.type == CanonicalActionType.ASK_USER ||
+            input.proposedAction.type == CanonicalActionType.DONE
+        ) {
+            return false
+        }
+        return true
+    }
+
+    private fun shouldAllowRecoveryBackPreview(state: GuardrailState): Boolean {
+        if (state.lastGoalStatus != GoalSatisfactionStatus.OFF_TRACK) {
+            return false
+        }
+        if (state.consecutiveLowYieldCount < config.noChangeThreshold) {
+            return false
+        }
+        val lastFinalAction = state.recentSteps.lastOrNull()?.finalActionType
+        return lastFinalAction != "BACK" && lastFinalAction != "HOME"
     }
 }
 

@@ -16,6 +16,8 @@ class VirtualDisplayRuntime(
         private const val DEFAULT_WIDTH = 1080
         private const val DEFAULT_HEIGHT = 1920
         private const val DEFAULT_MAX_IMAGES = 2
+        private const val VIRTUAL_DISPLAY_FLAG_SHOULD_SHOW_SYSTEM_DECORATIONS = 1 shl 9
+        private const val VIRTUAL_DISPLAY_FLAG_TRUSTED = 1 shl 10
     }
 
     data class RuntimeHandle(
@@ -45,15 +47,23 @@ class VirtualDisplayRuntime(
         )
         val surface = imageReader.surface
         val flags = DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY or
-            DisplayManager.VIRTUAL_DISPLAY_FLAG_PRESENTATION
-        val vd = dm.createVirtualDisplay(
-            "session-vd-${System.currentTimeMillis()}",
-            DEFAULT_WIDTH,
-            DEFAULT_HEIGHT,
-            densityDpi,
-            surface,
-            flags
-        )
+            DisplayManager.VIRTUAL_DISPLAY_FLAG_PRESENTATION or
+            VIRTUAL_DISPLAY_FLAG_TRUSTED or
+            VIRTUAL_DISPLAY_FLAG_SHOULD_SHOW_SYSTEM_DECORATIONS
+        val vd = try {
+            dm.createVirtualDisplay(
+                "session-vd-${System.currentTimeMillis()}",
+                DEFAULT_WIDTH,
+                DEFAULT_HEIGHT,
+                densityDpi,
+                surface,
+                flags
+            )
+        } catch (t: Throwable) {
+            imageReader.close()
+            Log.e(TAG, "create failed flags=$flags", t)
+            return null
+        }
 
         if (vd == null || vd.display == null) {
             imageReader.close()

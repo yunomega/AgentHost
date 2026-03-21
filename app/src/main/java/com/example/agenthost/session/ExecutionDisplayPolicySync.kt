@@ -3,6 +3,7 @@ package com.example.agenthost.session
 import android.view.Display
 import com.example.agenthost.platform.ExecutionDisplayPolicyGateway
 import com.example.agenthost.platform.ExecutionDisplayPolicyResponse
+import com.example.agenthost.platform.ExecutionDisplayStartupResponse
 
 internal enum class ExecutionDisplayBridgeState {
     EXECUTION,
@@ -37,6 +38,21 @@ internal class ExecutionDisplayPolicySync(
 
     fun clear(state: SessionState, reason: String): ExecutionDisplayPolicyResponse {
         return gateway.clearExecutionDisplaySession(state.sessionId, reason)
+    }
+
+    fun startStartupTarget(
+        state: SessionState,
+        startupMode: String,
+        componentName: String?,
+        reason: String
+    ): ExecutionDisplayStartupResponse {
+        return gateway.startExecutionDisplayStartupTarget(
+            sessionId = state.sessionId,
+            executionDisplayId = state.executionDisplayId,
+            startupMode = startupMode,
+            componentName = componentName,
+            reason = reason
+        )
     }
 }
 

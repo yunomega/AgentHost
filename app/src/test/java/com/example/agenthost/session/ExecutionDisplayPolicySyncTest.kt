@@ -3,6 +3,7 @@ package com.example.agenthost.session
 import android.view.Display
 import com.example.agenthost.platform.ExecutionDisplayPolicyGateway
 import com.example.agenthost.platform.ExecutionDisplayPolicyResponse
+import com.example.agenthost.platform.ExecutionDisplayStartupResponse
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -65,6 +66,29 @@ class ExecutionDisplayPolicySyncTest {
         sync.clear(state, "cleanup")
 
         assertEquals("clear:${state.sessionId}:cleanup", gateway.lastCall)
+    }
+
+    @Test
+    fun startupDelegatesToGatewayStart() {
+        val gateway = FakeGateway()
+        val sync = ExecutionDisplayPolicySync(gateway)
+        val state = virtualState().copy(
+            bootstrapTarget = SessionBootstrapTarget.EXPLICIT_COMPONENT,
+            bootstrapComponent = "pkg/.Activity"
+        )
+
+        val response = sync.startStartupTarget(
+            state = state,
+            startupMode = "EXPLICIT_COMPONENT_ON_DISPLAY",
+            componentName = state.bootstrapComponent,
+            reason = "test"
+        )
+
+        assertTrue(response.ok)
+        assertEquals(
+            "startup:${state.sessionId}:${state.executionDisplayId}:EXPLICIT_COMPONENT_ON_DISPLAY:${state.bootstrapComponent}:test",
+            gateway.lastCall
+        )
     }
 
     private fun virtualState(): SessionState {
@@ -136,6 +160,28 @@ class ExecutionDisplayPolicySyncTest {
         ): ExecutionDisplayPolicyResponse {
             lastCall = "clear:$sessionId:$reason"
             return ExecutionDisplayPolicyResponse(true, "EXECUTION_SESSION_CLEARED", "ok")
+        }
+
+        override fun startExecutionDisplayStartupTarget(
+            sessionId: String,
+            executionDisplayId: Int,
+            startupMode: String,
+            componentName: String?,
+            reason: String
+        ): ExecutionDisplayStartupResponse {
+            lastCall =
+                "startup:$sessionId:$executionDisplayId:$startupMode:${componentName ?: ""}:$reason"
+            return ExecutionDisplayStartupResponse(
+                ok = true,
+                code = "EXECUTION_DISPLAY_STARTUP_OK",
+                details = "ok",
+                requestedDisplayId = executionDisplayId,
+                boundDisplayId = executionDisplayId,
+                taskId = 10,
+                topActivity = "pkg/.Activity",
+                topPackage = "pkg",
+                resolvedComponent = componentName
+            )
         }
     }
 }

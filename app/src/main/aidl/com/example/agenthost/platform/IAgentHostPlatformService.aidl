@@ -16,6 +16,14 @@ interface IAgentHostPlatformService {
 
     Bundle clearExecutionDisplaySession(String sessionId, String reason);
 
+    Bundle startExecutionDisplayStartupTarget(
+        String sessionId,
+        int executionDisplayId,
+        String startupMode,
+        String componentName,
+        String reason
+    );
+
     Bundle injectTap(String sessionId, int displayId, int x, int y);
 
     Bundle injectSwipe(

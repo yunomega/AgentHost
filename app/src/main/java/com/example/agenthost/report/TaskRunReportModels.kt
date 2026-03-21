@@ -130,7 +130,9 @@ data class TaskRunLifecycleEvent(
     val currentVisibleDisplayId: Int?,
     val lastMigrationDirection: String?,
     val lastMigrationCode: String?,
-    val lastError: String?
+    val lastError: String?,
+    val bootstrapComponent: String? = null,
+    val lastResolvedBootstrapComponent: String? = null
 )
 
 data class TaskRunDiagnostics(

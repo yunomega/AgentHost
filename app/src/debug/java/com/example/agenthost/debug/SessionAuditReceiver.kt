@@ -657,7 +657,9 @@ class SessionAuditReceiver : BroadcastReceiver() {
             .replace("\n", "\\n")
         val displayMode = result.data["displayMode"] ?: "null"
         val bootstrapTarget = result.data["bootstrapTarget"] ?: "null"
+        val bootstrapComponent = result.data["bootstrapComponent"] ?: "null"
         val bootstrapCode = result.data["lastBootstrapCode"] ?: "null"
+        val resolvedBootstrapComponent = result.data["lastResolvedBootstrapComponent"] ?: "null"
         val visibleToUser = result.data["visibleToUser"] ?: "null"
         val pendingReturn = result.data["pendingReturnToVirtualDisplay"] ?: "null"
         Log.i(
@@ -668,7 +670,8 @@ class SessionAuditReceiver : BroadcastReceiver() {
                 "virtualDisplayId=$virtualDisplayId surfaceDisplayId=$surfaceDisplayId " +
                 "sessionTaskId=$sessionTaskId step=$step plannerMode=$plannerMode actionType=$actionType " +
                 "status=$status displayMode=$displayMode bootstrapTarget=$bootstrapTarget " +
-                "bootstrapCode=$bootstrapCode visibleToUser=$visibleToUser " +
+                "bootstrapComponent=$bootstrapComponent bootstrapCode=$bootstrapCode " +
+                "lastResolvedBootstrapComponent=$resolvedBootstrapComponent visibleToUser=$visibleToUser " +
                 "pendingReturnToVirtualDisplay=$pendingReturn waitingQuestion=$waitingQuestion " +
                 "lastKnownTaskId=$lastKnownTaskId lastKnownTaskAlive=$lastKnownTaskAlive " +
                 "lastKnownTaskDisplayId=$lastKnownTaskDisplayId " +
@@ -716,7 +719,9 @@ class SessionAuditReceiver : BroadcastReceiver() {
             "visibleToUser",
             "pendingReturnToVirtualDisplay",
             "bootstrapTarget",
+            "bootstrapComponent",
             "lastBootstrapCode",
+            "lastResolvedBootstrapComponent",
             "waitingQuestion",
             "lastError"
         )
@@ -748,7 +753,12 @@ class SessionAuditReceiver : BroadcastReceiver() {
             putNullable("visibleToUser", result.data["visibleToUser"])
             putNullable("pendingReturnToVirtualDisplay", result.data["pendingReturnToVirtualDisplay"])
             putNullable("bootstrapTarget", result.data["bootstrapTarget"])
+            putNullable("bootstrapComponent", result.data["bootstrapComponent"])
             putNullable("bootstrapCode", result.data["lastBootstrapCode"])
+            putNullable(
+                "lastResolvedBootstrapComponent",
+                result.data["lastResolvedBootstrapComponent"]
+            )
             putNullable("waitingQuestion", result.data["waitingQuestion"])
             putNullable("lastError", result.data["lastError"])
             result.data.forEach { (key, value) ->

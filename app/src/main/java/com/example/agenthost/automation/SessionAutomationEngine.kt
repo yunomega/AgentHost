@@ -460,7 +460,11 @@ class SessionAutomationEngine(
                         step = step,
                         command = snapshot.command,
                         beforeObservation = observation,
-                        action = proposedCanonicalAction
+                        action = proposedCanonicalAction,
+                        surfaceContext = SurfaceContext(
+                            topPackage = snapshot.lastKnownTopPackage,
+                            topActivity = snapshot.lastKnownTopActivity
+                        )
                     )
                     val action = controlResolution.finalAction
                     val actionType = action.actionType()
@@ -470,8 +474,8 @@ class SessionAutomationEngine(
                         proposedAction = controlResolution.proposedAction,
                         finalAction = controlResolution.finalCanonicalAction,
                         phaseBefore = controlResolution.phaseBefore.name,
-                        guardrailRule = controlResolution.guardrailDecision.rule,
-                        guardrailDecision = controlResolution.guardrailDecision.type.name
+                        guardrailRule = controlResolution.recoveryDecision.rule,
+                        guardrailDecision = controlResolution.recoveryDecision.type.name
                     )
                     log(
                         event = "action_parsed",
@@ -482,15 +486,15 @@ class SessionAutomationEngine(
                         sessionTaskId = snapshot.sessionTaskId,
                         step = step,
                         actionType = actionType,
-                        code = if (controlResolution.guardrailDecision.wasBlocked()) {
-                            controlResolution.guardrailDecision.rule ?: "ACTION_GUARDRAIL_REPLACED"
+                        code = if (controlResolution.recoveryDecision.wasOverridden()) {
+                            controlResolution.recoveryDecision.rule ?: "ACTION_RECOVERY_REPLACED"
                         } else {
                             "ACTION_READY"
                         },
-                        extras = if (controlResolution.guardrailDecision.wasBlocked()) {
+                        extras = if (controlResolution.recoveryDecision.wasOverridden()) {
                             "proposedAction=${proposedAction.actionType()} finalAction=$actionType " +
-                                "rule=${controlResolution.guardrailDecision.rule} " +
-                                "message=${controlResolution.guardrailDecision.message}"
+                                "rule=${controlResolution.recoveryDecision.rule} " +
+                                "message=${controlResolution.recoveryDecision.message}"
                         } else {
                             "{}"
                         }
@@ -661,13 +665,17 @@ class SessionAutomationEngine(
                         executionResult = executionResult,
                         controlSyntheticCode = controlSyntheticCode,
                         controlSyntheticDetails = controlSyntheticDetails,
-                        localChangeConfirmedPoint = localChangeConfirmedPoint
+                        localChangeConfirmedPoint = localChangeConfirmedPoint,
+                        surfaceContext = SurfaceContext(
+                            topPackage = snapshot.lastKnownTopPackage,
+                            topActivity = snapshot.lastKnownTopActivity
+                        )
                     )
                     TaskRunReportHooks.onControlStepEvaluated(
                         sessionId = snapshot.sessionId,
                         step = step,
                         phaseAfter = postResolution.phaseAfter.name,
-                        completionVerdict = postResolution.completionVerdict.name,
+                        completionVerdict = postResolution.goalStatus.name,
                         observationChanged = postResolution.observationChanged,
                         lowYield = postResolution.resultSummary.lowYield
                     )

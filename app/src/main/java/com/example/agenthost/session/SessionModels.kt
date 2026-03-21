@@ -11,7 +11,9 @@ enum class SessionDisplayMode {
 
 enum class SessionBootstrapTarget {
     NONE,
-    SETTINGS
+    SETTINGS,
+    SECONDARY_HOME,
+    EXPLICIT_COMPONENT
 }
 
 enum class CompletionReturnPolicy {
@@ -45,6 +47,7 @@ data class SessionStartOptions(
     val completionReturnPolicy: CompletionReturnPolicy = CompletionReturnPolicy.CURRENT_BEHAVIOR,
     val debugForceMainDisplay: Boolean = false,
     val bootstrapTarget: SessionBootstrapTarget = SessionBootstrapTarget.NONE,
+    val bootstrapComponent: String? = null,
     val plannerConfigOverride: PlannerConfig? = null
 ) {
     fun resolvedDisplayMode(): SessionDisplayMode {
@@ -88,9 +91,16 @@ data class SessionState(
     val recoveryNeeded: Boolean = false,
     val bootstrapTarget: SessionBootstrapTarget,
     val lastBootstrapCode: String?,
+    val bootstrapComponent: String? = null,
+    val lastResolvedBootstrapComponent: String? = null,
     val postCompletionDisposition: PostCompletionDisposition = PostCompletionDisposition.NONE,
     val postCompletionState: PostCompletionState = PostCompletionState.NONE,
-    val postCompletionResultCode: String? = null
+    val postCompletionResultCode: String? = null,
+    val stopTargetTaskId: Int = -1,
+    val stopTargetTopActivity: String? = null,
+    val stopTargetTopPackage: String? = null,
+    val stopTargetDisplayId: Int? = null,
+    val stopTargetResolutionSource: String? = null
 ) {
     // Compatibility mirror: there is no separate mutable current execution display.
     val currentExecutionDisplayId: Int

@@ -285,7 +285,9 @@ object TaskRunReportRenderer {
             "currentVisibleDisplayId" to currentVisibleDisplayId,
             "lastMigrationDirection" to lastMigrationDirection,
             "lastMigrationCode" to lastMigrationCode,
-            "lastError" to lastError
+            "lastError" to lastError,
+            "bootstrapComponent" to bootstrapComponent,
+            "lastResolvedBootstrapComponent" to lastResolvedBootstrapComponent
         )
     }
 

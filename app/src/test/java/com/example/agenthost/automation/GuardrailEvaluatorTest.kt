@@ -7,26 +7,28 @@ import org.junit.Test
 
 class GuardrailEvaluatorTest {
     @Test
-    fun doneOnlyPhaseReplacesClickWithSyntheticDone() {
-        val evaluator = GuardrailEvaluator()
-        val decision = evaluator.evaluatePreExecution(
-            step = 3,
-            state = GuardrailState(
-                subgoalState = SubgoalState(
-                    spec = null,
-                    phase = SubgoalPhase.DONE_ONLY
-                )
-            ),
-            beforeObservation = captured("ZmFrZS1h"),
-            action = CanonicalAction(
-                type = CanonicalActionType.CLICK,
-                coordSpace = CanonicalCoordSpace.IMAGE_PIXEL,
-                point = CanonicalPoint(540, 960)
+    fun goalSatisfiedOverridesClickWithSyntheticDone() {
+        val policy = DefaultRecoveryPolicy()
+        val decision = policy.decide(
+            RecoveryPolicyInput(
+                step = 3,
+                state = GuardrailState(
+                    subgoalState = SubgoalState(spec = null, phase = SubgoalPhase.DONE_ONLY),
+                    lastGoalStatus = GoalSatisfactionStatus.SATISFIED
+                ),
+                beforeObservation = captured("ZmFrZS1h"),
+                proposedAction = CanonicalAction(
+                    type = CanonicalActionType.CLICK,
+                    coordSpace = CanonicalCoordSpace.IMAGE_PIXEL,
+                    point = CanonicalPoint(540, 960)
+                ),
+                goalStatus = GoalSatisfactionStatus.SATISFIED,
+                surfaceContext = SurfaceContext()
             )
         )
 
-        assertEquals(GuardrailDecisionType.BLOCK_TERMINAL, decision.type)
-        assertEquals("POST_TARGET_GATE", decision.rule)
+        assertEquals(RecoveryDecisionType.OVERRIDE, decision.type)
+        assertEquals("GOAL_ALREADY_SATISFIED", decision.rule)
         assertEquals(CanonicalActionType.DONE, decision.finalCanonicalAction.type)
     }
 
@@ -51,7 +53,7 @@ class GuardrailEvaluatorTest {
                 beforeObservation = before,
                 action = action
             )
-            assertEquals(GuardrailDecisionType.ALLOW, resolution.guardrailDecision.type)
+            assertEquals(RecoveryDecisionType.EXECUTE_PROPOSED, resolution.recoveryDecision.type)
             coordinator.finalizeStep(
                 sessionId = "repeat-session",
                 step = index + 1,
@@ -73,13 +75,13 @@ class GuardrailEvaluatorTest {
             action = action
         )
 
-        assertEquals(GuardrailDecisionType.BLOCK_REPLACE, blocked.guardrailDecision.type)
-        assertEquals("REPEAT_CLICK_NEARBY_BLOCK", blocked.guardrailDecision.rule)
+        assertEquals(RecoveryDecisionType.OVERRIDE, blocked.recoveryDecision.type)
+        assertEquals("REPEAT_CLICK_NEARBY_BLOCK", blocked.recoveryDecision.rule)
         assertEquals("WAIT", blocked.finalAction.actionType())
     }
 
     @Test
-    fun doneWithCapturedObservationRequiresUserConfirmationWhenOnlyUnsure() {
+    fun doneWithCapturedObservationRequiresUserConfirmation() {
         val coordinator = AgentControlCoordinator()
         val before = captured("ZmFrZS1h")
         val resolution = coordinator.resolveAction(
@@ -105,7 +107,7 @@ class GuardrailEvaluatorTest {
             controlSyntheticDetails = "search bar looks ready"
         )
 
-        assertEquals(CompletionVerdict.UNSURE, post.completionVerdict)
+        assertEquals(GoalSatisfactionStatus.NEED_USER, post.goalStatus)
         assertFalse(post.requestSessionComplete)
         assertTrue(post.requestUserHandoff)
         assertTrue(post.completionConfirmationPending)
@@ -184,9 +186,74 @@ class GuardrailEvaluatorTest {
             action = action
         )
 
-        assertEquals(GuardrailDecisionType.BLOCK_REPLACE, blocked.guardrailDecision.type)
-        assertEquals("TOGGLE_REPEAT_CLICK_SUPPRESSED", blocked.guardrailDecision.rule)
-        assertEquals("WAIT", blocked.finalAction.actionType())
+        assertEquals(RecoveryDecisionType.OVERRIDE, blocked.recoveryDecision.type)
+        assertEquals("GOAL_ALREADY_SATISFIED", blocked.recoveryDecision.rule)
+        assertEquals("DONE", blocked.finalAction.actionType())
+    }
+
+    @Test
+    fun offTrackLowYieldAllowsRecoveryBack() {
+        val policy = DefaultRecoveryPolicy()
+        val decision = policy.decide(
+            RecoveryPolicyInput(
+                step = 5,
+                state = GuardrailState(
+                    subgoalState = SubgoalState(spec = null, phase = SubgoalPhase.NEED_CLICK_TARGET),
+                    recentSteps = ArrayDeque(
+                        listOf(
+                            ControlStepRecord(
+                                step = 4,
+                                proposedActionType = "CLICK",
+                                finalActionType = "CLICK",
+                                resultCategory = "SUCCESS_NO_CHANGE",
+                                summary = "stuck"
+                            )
+                        )
+                    ),
+                    consecutiveLowYieldCount = 3,
+                    lastGoalStatus = GoalSatisfactionStatus.OFF_TRACK
+                ),
+                beforeObservation = captured("ZmFrZS1a"),
+                proposedAction = CanonicalAction(
+                    type = CanonicalActionType.CLICK,
+                    coordSpace = CanonicalCoordSpace.IMAGE_PIXEL,
+                    point = CanonicalPoint(400, 600)
+                ),
+                goalStatus = GoalSatisfactionStatus.OFF_TRACK,
+                surfaceContext = SurfaceContext(
+                    topPackage = "com.example.other",
+                    topActivity = "com.example.other.Page"
+                )
+            )
+        )
+
+        assertEquals(RecoveryDecisionType.OVERRIDE, decision.type)
+        assertEquals("RECOVERY_BACK_ALLOWED", decision.rule)
+        assertEquals(CanonicalActionType.BACK, decision.finalCanonicalAction.type)
+    }
+
+    @Test
+    fun recentProgressBlocksRecoveryBack() {
+        val policy = DefaultRecoveryPolicy()
+        val decision = policy.decide(
+            RecoveryPolicyInput(
+                step = 5,
+                state = GuardrailState(
+                    subgoalState = SubgoalState(spec = null, phase = SubgoalPhase.NEED_CLICK_TARGET),
+                    lastProgressStep = 4,
+                    consecutiveLowYieldCount = 3,
+                    lastGoalStatus = GoalSatisfactionStatus.OFF_TRACK
+                ),
+                beforeObservation = captured("ZmFrZS1a"),
+                proposedAction = CanonicalAction(type = CanonicalActionType.BACK),
+                goalStatus = GoalSatisfactionStatus.OFF_TRACK,
+                surfaceContext = SurfaceContext()
+            )
+        )
+
+        assertEquals(RecoveryDecisionType.OVERRIDE, decision.type)
+        assertEquals("BACK_RECENT_PROGRESS_BLOCK", decision.rule)
+        assertEquals(CanonicalActionType.WAIT, decision.finalCanonicalAction.type)
     }
 
     private fun captured(base64: String): ObservationResult.Captured {

@@ -97,7 +97,7 @@
   会话在 `WAITING_USER`，且任务已迁到主屏。
 - 气泡文案：
   `bubbleText=等你`
-  `bubbleDetail=主屏处理中`
+  `bubbleDetail=主屏处理中`codex
 - 第一阶段：
   展示 NeedUser 卡片。
   `title=主屏接手中`

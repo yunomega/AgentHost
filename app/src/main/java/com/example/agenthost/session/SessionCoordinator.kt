@@ -27,6 +27,8 @@ import com.example.agenthost.migration.TaskMigrationTarget
 import com.example.agenthost.migration.TaskValidationResult
 import com.example.agenthost.overlay.OverlayStateMapper
 import com.example.agenthost.platform.AgentHostPlatformClient
+import com.example.agenthost.platform.ExecutionDisplayStartupMode
+import com.example.agenthost.platform.ExecutionDisplayStartupResponse
 import com.example.agenthost.runtime.VirtualDisplayRuntime
 import java.util.UUID
 
@@ -47,10 +49,27 @@ class SessionCoordinator(
         private const val MIGRATION_TO_MAIN = "TO_MAIN"
         private const val MIGRATION_TO_EXECUTION = "TO_EXECUTION"
         private const val TASK_MIGRATION_PRECHECK_OK = "TASK_MIGRATION_PRECHECK_OK"
+        private const val BIND_PATH_RESOLVED_PACKAGE = "resolved_package_match"
+        private const val BIND_PATH_TOP_TASK_FALLBACK = "top_task_fallback"
+        private const val STARTUP_CODE_OK = "EXECUTION_DISPLAY_STARTUP_OK"
+        private const val STARTUP_REASON_PRIMARY = "primary_bootstrap"
+        private const val STARTUP_REASON_SECONDARY_HOME_FALLBACK = "secondary_home_fallback"
+        private const val STOP_TARGET_UNRESOLVED = "STOP_TARGET_UNRESOLVED"
     }
 
     private data class SessionDebugBehavior(
         val skipWaitingUserAutoMigrate: Boolean = false
+    )
+
+    private data class BootstrapTargetDefinition(
+        val launchIntent: Intent,
+        val preferredPackageName: String? = null
+    )
+
+    private data class BootstrapTargetResolution(
+        val target: TaskMigrationTarget?,
+        val matchPath: String,
+        val resolvedPackageName: String?
     )
 
     private val lock = Any()
@@ -384,7 +403,8 @@ class SessionCoordinator(
             lastMigrationCode = null,
             lastMigrationDirection = null,
             bootstrapTarget = options.bootstrapTarget,
-            lastBootstrapCode = null
+            lastBootstrapCode = null,
+            bootstrapComponent = options.bootstrapComponent
         )
         activeRuntime = runtime
         activeSession = state
@@ -470,6 +490,23 @@ class SessionCoordinator(
         )
 
         state = bootstrapExecutionDisplayLocked(state)
+        if (!isBootstrapReady(state)) {
+            return@synchronized failAndCleanupLocked(
+                code = state.lastBootstrapCode ?: "EXECUTION_DISPLAY_STARTUP_NOT_READY",
+                state = state
+            )
+        }
+        state = bindBootstrapTargetStateLocked(
+            state,
+            trigger = "session_start",
+            forceRefresh = false
+        )
+        if (!isBootstrapReady(state)) {
+            return@synchronized failAndCleanupLocked(
+                code = state.lastBootstrapCode ?: "EXECUTION_DISPLAY_STARTUP_NOT_READY",
+                state = state
+            )
+        }
         activeSession = state
 
         if (resolvedMode == SessionDisplayMode.VIRTUAL_DISPLAY && options.visibleToUser) {
@@ -505,7 +542,19 @@ class SessionCoordinator(
             )
         }
 
-        val running = state.copy(
+        val prepared = bindBootstrapTargetStateLocked(
+            state,
+            trigger = "automation_start",
+            forceRefresh = true
+        )
+        if (!isBootstrapReady(prepared)) {
+            return@synchronized failResult(
+                code = prepared.lastBootstrapCode ?: "EXECUTION_DISPLAY_STARTUP_NOT_READY",
+                data = stateData(prepared)
+            )
+        }
+        activeSession = prepared
+        val running = prepared.copy(
             status = SessionStatus.RUNNING,
             waitingQuestion = null,
             waitingUserDisposition = WaitingUserDisposition.STANDARD_HANDOFF,
@@ -814,6 +863,11 @@ class SessionCoordinator(
                     "lastKnownTaskDisplayId=${state.lastKnownTaskDisplayId ?: "null"} " +
                     "lastKnownTopActivity=${state.lastKnownTopActivity ?: "null"} " +
                     "lastKnownTopPackage=${state.lastKnownTopPackage ?: "null"} " +
+                    "stopTargetTaskId=${state.stopTargetTaskId} " +
+                    "stopTargetTopActivity=${state.stopTargetTopActivity ?: "null"} " +
+                    "stopTargetTopPackage=${state.stopTargetTopPackage ?: "null"} " +
+                    "stopTargetDisplayId=${state.stopTargetDisplayId ?: "null"} " +
+                    "stopTargetResolutionSource=${state.stopTargetResolutionSource ?: "null"} " +
                     "userForegroundTaskId=${state.userForegroundTaskId ?: "null"} " +
                     "recoveryNeeded=${state.recoveryNeeded}"
             )
@@ -847,7 +901,12 @@ class SessionCoordinator(
             status = SessionStatus.STOPPING,
             lastError = null,
             waitingQuestion = null,
-            waitingUserDisposition = WaitingUserDisposition.STANDARD_HANDOFF
+            waitingUserDisposition = WaitingUserDisposition.STANDARD_HANDOFF,
+            stopTargetTaskId = INVALID_TASK_ID,
+            stopTargetTopActivity = null,
+            stopTargetTopPackage = null,
+            stopTargetDisplayId = null,
+            stopTargetResolutionSource = null
         )
         activeSession = stopping
         logInfo(
@@ -872,17 +931,14 @@ class SessionCoordinator(
         stopping = dismissMirrorSurfaceLocked(stopping, reason = "stop_session")
         activeSession = stopping
         if (migrate) {
-            val rebound = bindStopMigrationState(stopping, ::resolveInitialMigrationTargetLocked)
-            if (rebound != stopping) {
-                stopping = rebound
-                activeSession = stopping
-                logInfo(
-                    event = "stop_session_migration_target_bound",
-                    state = stopping,
-                    step = stopping.automationStep,
-                    actionType = "NONE",
-                    code = "STOP_MIGRATION_TARGET_BOUND",
-                    extras = "taskId=${stopping.lastKnownTaskId} package=${stopping.lastKnownTopPackage ?: "null"}"
+            val resolution = resolveStopMigrationTargetLocked(stopping)
+            stopping = applyStopMigrationTargetResolutionLocked(stopping, resolution)
+            activeSession = stopping
+            logStopMigrationTargetResolutionLocked(stopping, resolution)
+            if (!resolution.isResolved) {
+                return failAndCleanupLocked(
+                    code = resolution.failureCode ?: STOP_TARGET_UNRESOLVED,
+                    state = stopping
                 )
             }
         }
@@ -895,7 +951,7 @@ class SessionCoordinator(
         if (taskId <= 0) {
             val code = when {
                 preemptive -> "PREEMPTIVE_CLEANUP"
-                migrate -> stopping.lastMigrationCode ?: "MIGRATION_FAILED"
+                migrate -> stopping.lastMigrationCode ?: STOP_TARGET_UNRESOLVED
                 else -> "CLOSE_FAILED"
             }
             return failAndCleanupLocked(
@@ -905,6 +961,7 @@ class SessionCoordinator(
         }
 
         val forceMigrationFail = migrate && SessionAuditHooks.consumeForceMigrationFail()
+        var moveFailureCode: String? = null
         val success = if (migrate) {
             if (forceMigrationFail) {
                 logInfo(
@@ -914,9 +971,14 @@ class SessionCoordinator(
                     actionType = "NONE",
                     code = "FORCED_MIGRATION_FAILURE"
                 )
+                moveFailureCode = "FORCED_MIGRATION_FAILURE"
                 false
             } else {
-                taskMigrationController.moveTaskToDisplay(taskId, Display.DEFAULT_DISPLAY)
+                taskMigrationController.moveTaskToDisplay(taskId, Display.DEFAULT_DISPLAY).also { ok ->
+                    if (!ok) {
+                        moveFailureCode = "TASK_MOVE_FAILED"
+                    }
+                }
             }
         } else {
             taskMigrationController.closeTask(taskId)
@@ -963,9 +1025,43 @@ class SessionCoordinator(
             cleanupLocked(stopping.sessionId)
             result
         } else {
+            val failedState = if (migrate) {
+                stopping.copy(
+                    lastMigrationCode = moveFailureCode ?: "TASK_MOVE_FAILED",
+                    lastMigrationDirection = MIGRATION_TO_MAIN,
+                    lastMigrationConflictCode = null,
+                    lastMigrationConflictReason = null
+                )
+            } else {
+                stopping
+            }
+            if (migrate) {
+                activeSession = failedState
+                logError(
+                    event = "stop_session_migration_move_failed",
+                    state = failedState,
+                    step = failedState.automationStep,
+                    actionType = "NONE",
+                    code = failedState.lastMigrationCode ?: "TASK_MOVE_FAILED",
+                    extras = migrationExtras(
+                        sourceDisplayId = failedState.executionDisplayId,
+                        targetDisplayId = Display.DEFAULT_DISPLAY,
+                        taskId = failedState.stopTargetTaskId.takeIf { it > 0 } ?: failedState.lastKnownTaskId,
+                        topActivity = failedState.stopTargetTopActivity ?: failedState.lastKnownTopActivity,
+                        packageName = failedState.stopTargetTopPackage ?: failedState.lastKnownTopPackage,
+                        reason = "source=${failedState.stopTargetResolutionSource ?: "null"} reason=move_failed",
+                        expectedTaskId = failedState.lastKnownTaskId,
+                        actualForegroundTaskId = failedState.userForegroundTaskId
+                    ) + " stopTargetDisplayId=${failedState.stopTargetDisplayId ?: "null"}"
+                )
+            }
             failAndCleanupLocked(
-                code = if (migrate) "MIGRATION_FAILED" else "CLOSE_FAILED",
-                state = stopping
+                code = if (migrate) {
+                    failedState.lastMigrationCode ?: "TASK_MOVE_FAILED"
+                } else {
+                    "CLOSE_FAILED"
+                },
+                state = failedState
             )
         }
     }
@@ -1460,6 +1556,92 @@ class SessionCoordinator(
         return null
     }
 
+    private fun resolveStopMigrationTargetLocked(state: SessionState): StopMigrationTargetResolution {
+        val querySupported = taskMigrationController.isTaskQuerySupported()
+        val currentTopTask = if (state.displayMode == SessionDisplayMode.VIRTUAL_DISPLAY && querySupported) {
+            taskMigrationController.findTopTaskOnDisplay(
+                displayId = state.executionDisplayId,
+                excludedPackages = migrationExcludedPackages
+            )
+        } else {
+            null
+        }
+        return resolveStopMigrationTarget(
+            state = state,
+            taskQuerySupported = querySupported,
+            currentTopTask = currentTopTask,
+            agentHostPackage = appContext.packageName
+        )
+    }
+
+    private fun applyStopMigrationTargetResolutionLocked(
+        state: SessionState,
+        resolution: StopMigrationTargetResolution
+    ): SessionState {
+        val observed = resolution.selectedTarget ?: resolution.observedTask
+        return state.copy(
+            stopTargetTaskId = resolution.selectedTarget?.taskId ?: INVALID_TASK_ID,
+            stopTargetTopActivity = observed?.topActivity,
+            stopTargetTopPackage = observed?.packageName,
+            stopTargetDisplayId = observed?.displayId ?: when (state.displayMode) {
+                SessionDisplayMode.VIRTUAL_DISPLAY -> state.executionDisplayId
+                else -> Display.DEFAULT_DISPLAY
+            },
+            stopTargetResolutionSource = resolution.resolutionSource,
+            lastMigrationCode = resolution.failureCode ?: state.lastMigrationCode,
+            lastMigrationDirection = if (resolution.failureCode != null) {
+                MIGRATION_TO_MAIN
+            } else {
+                state.lastMigrationDirection
+            },
+            lastMigrationConflictCode = if (resolution.failureCode != null) null else state.lastMigrationConflictCode,
+            lastMigrationConflictReason = if (resolution.failureCode != null) null else state.lastMigrationConflictReason
+        )
+    }
+
+    private fun logStopMigrationTargetResolutionLocked(
+        state: SessionState,
+        resolution: StopMigrationTargetResolution
+    ) {
+        val code = if (resolution.isResolved) {
+            "STOP_TARGET_RESOLVED"
+        } else {
+            resolution.failureCode ?: STOP_TARGET_UNRESOLVED
+        }
+        val taskId = state.stopTargetTaskId.takeIf { it > 0 }
+            ?: resolution.observedTask?.taskId
+            ?: INVALID_TASK_ID
+        val extras = migrationExtras(
+            sourceDisplayId = state.executionDisplayId,
+            targetDisplayId = Display.DEFAULT_DISPLAY,
+            taskId = taskId,
+            topActivity = state.stopTargetTopActivity,
+            packageName = state.stopTargetTopPackage,
+            reason = "source=${state.stopTargetResolutionSource ?: "null"}",
+            expectedTaskId = state.lastKnownTaskId,
+            actualForegroundTaskId = state.userForegroundTaskId
+        ) + " stopTargetDisplayId=${state.stopTargetDisplayId ?: "null"}"
+        if (resolution.isResolved) {
+            logInfo(
+                event = "stop_session_stop_target_resolved",
+                state = state,
+                step = state.automationStep,
+                actionType = "NONE",
+                code = code,
+                extras = extras
+            )
+        } else {
+            logError(
+                event = "stop_session_stop_target_unresolved",
+                state = state,
+                step = state.automationStep,
+                actionType = "NONE",
+                code = code,
+                extras = extras
+            )
+        }
+    }
+
     private fun validateBoundTask(taskId: Int, expectedDisplayId: Int): TaskValidationResult {
         val actualForegroundTaskId = findMainForegroundTaskLocked()?.taskId
         if (taskId <= 0) {
@@ -1883,17 +2065,27 @@ class SessionCoordinator(
         if (state.bootstrapTarget == SessionBootstrapTarget.NONE) {
             return state
         }
-        val intentAction = when (state.bootstrapTarget) {
-            SessionBootstrapTarget.SETTINGS -> Settings.ACTION_SETTINGS
-            SessionBootstrapTarget.NONE -> return state
+        return if (state.bootstrapTarget.isFrameworkManaged()) {
+            bootstrapFrameworkManagedExecutionDisplayLocked(state)
+        } else {
+            bootstrapLegacyExecutionDisplayLocked(state)
         }
+    }
+
+    private fun bootstrapLegacyExecutionDisplayLocked(state: SessionState): SessionState {
+        val definition = buildBootstrapTargetDefinition(state.bootstrapTarget) ?: return state
+        val resolvedPackageName = definition.preferredPackageName ?: "null"
+        val intentSummary = definition.launchIntent.action
+            ?: definition.launchIntent.categories?.joinToString(separator = ",")
+            ?: "none"
         logInfo(
             event = "execution_display_bootstrap_begin",
             state = state,
             step = 0,
             actionType = "NONE",
             code = "EXECUTION_DISPLAY_BOOTSTRAP_BEGIN",
-            extras = "bootstrapTarget=${state.bootstrapTarget.name} intentAction=$intentAction"
+            extras = "bootstrapTarget=${state.bootstrapTarget.name} intent=$intentSummary " +
+                "resolvedPackage=$resolvedPackageName"
         )
 
         val options = LaunchOptionsCompat.build(state.executionDisplayId)
@@ -1905,16 +2097,14 @@ class SessionCoordinator(
                 step = 0,
                 actionType = "NONE",
                 code = "EXECUTION_DISPLAY_BOOTSTRAP_INFEASIBLE",
-                extras = "bootstrapTarget=${state.bootstrapTarget.name} reason=launch_options_unavailable"
+                extras = "bootstrapTarget=${state.bootstrapTarget.name} reason=launch_options_unavailable " +
+                    "resolvedPackage=$resolvedPackageName"
             )
             return updated
         }
 
-        val intent = Intent(intentAction).apply {
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        }
         return try {
-            appContext.startActivity(intent, options.toBundle())
+            appContext.startActivity(definition.launchIntent, options.toBundle())
             val updated = state.copy(lastBootstrapCode = "EXECUTION_DISPLAY_BOOTSTRAP_OK")
             logInfo(
                 event = "execution_display_bootstrap_success",
@@ -1922,7 +2112,8 @@ class SessionCoordinator(
                 step = 0,
                 actionType = "NONE",
                 code = "EXECUTION_DISPLAY_BOOTSTRAP_OK",
-                extras = "bootstrapTarget=${state.bootstrapTarget.name} intentAction=$intentAction"
+                extras = "bootstrapTarget=${state.bootstrapTarget.name} intent=$intentSummary " +
+                    "resolvedPackage=$resolvedPackageName"
             )
             updated
         } catch (t: Throwable) {
@@ -1941,11 +2132,243 @@ class SessionCoordinator(
                 step = 0,
                 actionType = "NONE",
                 code = code,
-                extras = "bootstrapTarget=${state.bootstrapTarget.name} intentAction=$intentAction",
+                extras = "bootstrapTarget=${state.bootstrapTarget.name} intent=$intentSummary " +
+                    "resolvedPackage=$resolvedPackageName",
                 error = t
             )
             updated
         }
+    }
+
+    private fun bootstrapFrameworkManagedExecutionDisplayLocked(state: SessionState): SessionState {
+        val primaryMode = state.primaryStartupMode()
+        val primaryComponent = state.primaryStartupComponent()
+        logInfo(
+            event = "execution_display_bootstrap_begin",
+            state = state,
+            step = 0,
+            actionType = "NONE",
+            code = "EXECUTION_DISPLAY_BOOTSTRAP_BEGIN",
+            extras = "startupMode=$primaryMode component=${primaryComponent ?: "null"}"
+        )
+        val primaryResponse = executionDisplayPolicySync.startStartupTarget(
+            state = state,
+            startupMode = primaryMode,
+            componentName = primaryComponent,
+            reason = STARTUP_REASON_PRIMARY
+        )
+        if (primaryResponse.ok) {
+            return applyStartupSuccessLocked(
+                state = state,
+                response = primaryResponse,
+                startupMode = primaryMode,
+                fallbackUsed = false
+            )
+        }
+
+        logStartupFailure(
+            state = state,
+            response = primaryResponse,
+            startupMode = primaryMode,
+            fallbackUsed = false
+        )
+
+        if (state.bootstrapTarget != SessionBootstrapTarget.SECONDARY_HOME ||
+            state.bootstrapComponent.isNullOrBlank()
+        ) {
+            return applyStartupFailure(state, primaryResponse)
+        }
+
+        val fallbackResponse = executionDisplayPolicySync.startStartupTarget(
+            state = state,
+            startupMode = ExecutionDisplayStartupMode.EXPLICIT_COMPONENT_ON_DISPLAY,
+            componentName = state.bootstrapComponent,
+            reason = STARTUP_REASON_SECONDARY_HOME_FALLBACK
+        )
+        if (fallbackResponse.ok) {
+            return applyStartupSuccessLocked(
+                state = state,
+                response = fallbackResponse,
+                startupMode = ExecutionDisplayStartupMode.EXPLICIT_COMPONENT_ON_DISPLAY,
+                fallbackUsed = true
+            )
+        }
+
+        logStartupFailure(
+            state = state,
+            response = fallbackResponse,
+            startupMode = ExecutionDisplayStartupMode.EXPLICIT_COMPONENT_ON_DISPLAY,
+            fallbackUsed = true
+        )
+        return applyStartupFailure(state, fallbackResponse)
+    }
+
+    private fun buildBootstrapTargetDefinition(target: SessionBootstrapTarget): BootstrapTargetDefinition? {
+        return when (target) {
+            SessionBootstrapTarget.NONE -> null
+            SessionBootstrapTarget.SETTINGS -> BootstrapTargetDefinition(
+                launchIntent = Intent(Settings.ACTION_SETTINGS).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                },
+                preferredPackageName = SETTINGS_PACKAGE
+            )
+            SessionBootstrapTarget.SECONDARY_HOME,
+            SessionBootstrapTarget.EXPLICIT_COMPONENT -> null
+        }
+    }
+
+    private fun resolveBootstrapExecutionTargetLocked(state: SessionState): BootstrapTargetResolution {
+        val resolvedPackageName = buildBootstrapTargetDefinition(state.bootstrapTarget)?.preferredPackageName
+        resolvedPackageName?.let { packageName ->
+            taskMigrationController.findTaskOnDisplayByPackage(
+                displayId = state.executionDisplayId,
+                packageName = packageName
+            )?.let { target ->
+                return BootstrapTargetResolution(
+                    target = target,
+                    matchPath = BIND_PATH_RESOLVED_PACKAGE,
+                    resolvedPackageName = packageName
+                )
+            }
+        }
+        val fallback = taskMigrationController.findTopTaskOnDisplay(
+            displayId = state.executionDisplayId,
+            excludedPackages = migrationExcludedPackages
+        )
+        return BootstrapTargetResolution(
+            target = fallback,
+            matchPath = BIND_PATH_TOP_TASK_FALLBACK,
+            resolvedPackageName = resolvedPackageName
+        )
+    }
+
+    private fun bindBootstrapTargetStateLocked(
+        state: SessionState,
+        trigger: String,
+        forceRefresh: Boolean
+    ): SessionState {
+        if (state.displayMode != SessionDisplayMode.VIRTUAL_DISPLAY ||
+            state.bootstrapTarget == SessionBootstrapTarget.NONE
+        ) {
+            return state
+        }
+        if (state.bootstrapTarget.isFrameworkManaged()) {
+            return bindFrameworkManagedBootstrapTargetStateLocked(state, trigger, forceRefresh)
+        }
+        if (!taskMigrationController.isTaskQuerySupported()) {
+            return state
+        }
+        val resolution = resolveBootstrapExecutionTargetLocked(state)
+        val bound = bindBootstrapTargetState(
+            state = state,
+            forceRefresh = forceRefresh
+        ) { resolution.target }
+        if (resolution.target == null) {
+            logError(
+                event = "execution_display_surface_bind_failed",
+                state = state,
+                step = 0,
+                actionType = "NONE",
+                code = "EXECUTION_DISPLAY_SURFACE_TARGET_MISSING",
+                extras = "trigger=$trigger bootstrapTarget=${state.bootstrapTarget.name} " +
+                    "matchPath=${resolution.matchPath} resolvedPackage=${resolution.resolvedPackageName ?: "null"} " +
+                    "forceRefresh=$forceRefresh"
+            )
+            return state
+        }
+        if (bound == state && !forceRefresh) {
+            return state
+        }
+        logInfo(
+            event = "execution_display_surface_bound",
+            state = bound,
+            step = 0,
+            actionType = "NONE",
+            code = if (bound == state) {
+                "EXECUTION_DISPLAY_SURFACE_CONFIRMED"
+            } else {
+                "EXECUTION_DISPLAY_SURFACE_BOUND"
+            },
+            extras = migrationExtras(
+                sourceDisplayId = bound.executionDisplayId,
+                targetDisplayId = bound.executionDisplayId,
+                taskId = bound.lastKnownTaskId,
+                topActivity = bound.lastKnownTopActivity,
+                packageName = bound.lastKnownTopPackage,
+                reason = "trigger=$trigger reason=initial_app_surface_bound " +
+                    "matchPath=${resolution.matchPath} resolvedPackage=${resolution.resolvedPackageName ?: "null"} " +
+                    "forceRefresh=$forceRefresh",
+                expectedTaskId = bound.lastKnownTaskId,
+                actualForegroundTaskId = bound.userForegroundTaskId
+            )
+        )
+        return bound
+    }
+
+    private fun bindFrameworkManagedBootstrapTargetStateLocked(
+        state: SessionState,
+        trigger: String,
+        forceRefresh: Boolean
+    ): SessionState {
+        if (state.lastKnownTaskId <= 0 || !forceRefresh || !taskMigrationController.isTaskQuerySupported()) {
+            return state
+        }
+        val validation = validateBoundTask(state.lastKnownTaskId, state.executionDisplayId)
+        if (!validation.ok) {
+            val failed = state.copy(
+                lastBootstrapCode = validation.code,
+                lastKnownTaskAlive = validation.target != null,
+                lastKnownTaskDisplayId = validation.target?.displayId ?: state.lastKnownTaskDisplayId,
+                currentVisibleDisplayId = validation.target?.displayId ?: state.currentVisibleDisplayId,
+                lastKnownTopActivity = validation.target?.topActivity ?: state.lastKnownTopActivity,
+                lastKnownTopPackage = validation.target?.packageName ?: state.lastKnownTopPackage,
+                userForegroundTaskId = validation.actualForegroundTaskId
+            )
+            logError(
+                event = "execution_display_surface_bind_failed",
+                state = failed,
+                step = 0,
+                actionType = "NONE",
+                code = validation.code,
+                extras = migrationExtras(
+                    sourceDisplayId = state.executionDisplayId,
+                    targetDisplayId = state.executionDisplayId,
+                    taskId = failed.lastKnownTaskId,
+                    topActivity = failed.lastKnownTopActivity,
+                    packageName = failed.lastKnownTopPackage,
+                    reason = "trigger=$trigger reason=framework_startup_validation_failed ${validation.reason}",
+                    expectedTaskId = state.lastKnownTaskId,
+                    actualForegroundTaskId = validation.actualForegroundTaskId
+                )
+            )
+            return failed
+        }
+        val target = validation.target ?: return state
+        val bound = rememberTaskState(
+            state = state.copy(
+                lastBootstrapCode = STARTUP_CODE_OK
+            ),
+            target = target,
+            userForegroundTaskId = validation.actualForegroundTaskId
+        )
+        logInfo(
+            event = "execution_display_surface_bound",
+            state = bound,
+            step = 0,
+            actionType = "NONE",
+            code = "EXECUTION_DISPLAY_SURFACE_CONFIRMED",
+            extras = migrationExtras(
+                sourceDisplayId = bound.executionDisplayId,
+                targetDisplayId = bound.executionDisplayId,
+                taskId = bound.lastKnownTaskId,
+                topActivity = bound.lastKnownTopActivity,
+                packageName = bound.lastKnownTopPackage,
+                reason = "trigger=$trigger reason=framework_startup_task_validated",
+                expectedTaskId = bound.lastKnownTaskId,
+                actualForegroundTaskId = validation.actualForegroundTaskId
+            )
+        )
+        return bound
     }
 
     private fun showSessionOnMainLocked(state: SessionState, reason: String): SessionState {
@@ -2048,7 +2471,8 @@ class SessionCoordinator(
     private fun failAndCleanupLocked(
         code: String,
         state: SessionState?,
-        reportSessionId: String? = state?.sessionId
+        reportSessionId: String? = state?.sessionId,
+        extraData: Map<String, Any?> = emptyMap()
     ): SessionResult {
         if (state != null) {
             val failedBase = dismissMirrorSurfaceLocked(state, reason = "fail_cleanup")
@@ -2075,7 +2499,7 @@ class SessionCoordinator(
                 finalCode = code
             )
             cleanupLocked(state.sessionId)
-            return failResult(code = code, data = stateData(failedState))
+            return failResult(code = code, data = stateData(failedState) + extraData)
         }
         cleanupLocked(sessionId = null)
         logError(
@@ -2099,7 +2523,7 @@ class SessionCoordinator(
                 finalCode = code
             )
         }
-        return failResult(code = code)
+        return failResult(code = code, data = extraData)
     }
 
     private fun cleanupCompletedSessionLocked(sessionId: String) {
@@ -2290,6 +2714,11 @@ class SessionCoordinator(
             "lastKnownTaskId" to state.lastKnownTaskId,
             "lastKnownTopActivity" to state.lastKnownTopActivity,
             "lastKnownTopPackage" to state.lastKnownTopPackage,
+            "stopTargetTaskId" to state.stopTargetTaskId,
+            "stopTargetTopActivity" to state.stopTargetTopActivity,
+            "stopTargetTopPackage" to state.stopTargetTopPackage,
+            "stopTargetDisplayId" to state.stopTargetDisplayId,
+            "stopTargetResolutionSource" to state.stopTargetResolutionSource,
             "status" to state.status.name,
             "command" to state.command,
             "displayMode" to state.displayMode.name,
@@ -2308,7 +2737,9 @@ class SessionCoordinator(
             "userForegroundTaskId" to state.userForegroundTaskId,
             "recoveryNeeded" to state.recoveryNeeded,
             "bootstrapTarget" to state.bootstrapTarget.name,
+            "bootstrapComponent" to state.bootstrapComponent,
             "lastBootstrapCode" to state.lastBootstrapCode,
+            "lastResolvedBootstrapComponent" to state.lastResolvedBootstrapComponent,
             "postCompletionDisposition" to state.postCompletionDisposition.name,
             "postCompletionState" to state.postCompletionState.name,
             "postCompletionResultCode" to state.postCompletionResultCode,
@@ -2329,6 +2760,104 @@ class SessionCoordinator(
 
             else -> PostCompletionDisposition.CLEANUP_IMMEDIATELY
         }
+    }
+
+    private fun SessionBootstrapTarget.isFrameworkManaged(): Boolean {
+        return this == SessionBootstrapTarget.SECONDARY_HOME ||
+            this == SessionBootstrapTarget.EXPLICIT_COMPONENT
+    }
+
+    private fun SessionState.primaryStartupMode(): String {
+        return when (bootstrapTarget) {
+            SessionBootstrapTarget.SECONDARY_HOME -> ExecutionDisplayStartupMode.SECONDARY_HOME
+            SessionBootstrapTarget.EXPLICIT_COMPONENT -> {
+                ExecutionDisplayStartupMode.EXPLICIT_COMPONENT_ON_DISPLAY
+            }
+
+            else -> ""
+        }
+    }
+
+    private fun SessionState.primaryStartupComponent(): String? {
+        return when (bootstrapTarget) {
+            SessionBootstrapTarget.EXPLICIT_COMPONENT -> bootstrapComponent
+            else -> null
+        }
+    }
+
+    private fun isBootstrapReady(state: SessionState): Boolean {
+        if (!state.bootstrapTarget.isFrameworkManaged()) {
+            return true
+        }
+        if (state.lastBootstrapCode != STARTUP_CODE_OK) {
+            return false
+        }
+        return state.lastKnownTaskId > 0 &&
+            !state.lastKnownTopActivity.isNullOrBlank() &&
+            !state.lastKnownTopPackage.isNullOrBlank() &&
+            state.lastKnownTaskDisplayId == state.executionDisplayId &&
+            state.currentVisibleDisplayId == state.executionDisplayId
+    }
+
+    private fun applyStartupSuccessLocked(
+        state: SessionState,
+        response: ExecutionDisplayStartupResponse,
+        startupMode: String,
+        fallbackUsed: Boolean
+    ): SessionState {
+        val updated = state.copy(
+            lastBootstrapCode = response.code,
+            lastResolvedBootstrapComponent = response.resolvedComponent,
+            lastKnownTaskId = response.taskId,
+            lastKnownTopActivity = response.topActivity,
+            lastKnownTopPackage = response.topPackage,
+            lastKnownTaskAlive = response.taskId > 0,
+            lastKnownTaskDisplayId = response.boundDisplayId,
+            currentVisibleDisplayId = response.boundDisplayId
+        )
+        logInfo(
+            event = "execution_display_bootstrap_success",
+            state = updated,
+            step = 0,
+            actionType = "NONE",
+            code = response.code,
+            extras = "startupMode=$startupMode fallbackUsed=$fallbackUsed " +
+                "requestedDisplayId=${response.requestedDisplayId} boundDisplayId=${response.boundDisplayId} " +
+                "taskId=${response.taskId} resolvedComponent=${response.resolvedComponent ?: "null"}"
+        )
+        return updated
+    }
+
+    private fun applyStartupFailure(
+        state: SessionState,
+        response: ExecutionDisplayStartupResponse
+    ): SessionState {
+        return state.copy(
+            lastBootstrapCode = response.code,
+            lastResolvedBootstrapComponent = response.resolvedComponent
+        )
+    }
+
+    private fun logStartupFailure(
+        state: SessionState,
+        response: ExecutionDisplayStartupResponse,
+        startupMode: String,
+        fallbackUsed: Boolean
+    ) {
+        logError(
+            event = "execution_display_bootstrap_failed",
+            state = state.copy(
+                lastBootstrapCode = response.code,
+                lastResolvedBootstrapComponent = response.resolvedComponent
+            ),
+            step = 0,
+            actionType = "NONE",
+            code = response.code,
+            extras = "startupMode=$startupMode fallbackUsed=$fallbackUsed " +
+                "requestedDisplayId=${response.requestedDisplayId} boundDisplayId=${response.boundDisplayId} " +
+                "taskId=${response.taskId} resolvedComponent=${response.resolvedComponent ?: "null"} " +
+                "details=${response.details}"
+        )
     }
 
     private fun normalizeCompletedPostActionState(
@@ -2525,6 +3054,8 @@ class SessionCoordinator(
         val surfaceId = surfaceDisplayId ?: state?.surfaceDisplayId ?: activeState?.surfaceDisplayId
         val tid = sessionTaskId ?: state?.sessionTaskId ?: INVALID_TASK_ID
         val targetTaskId = state?.lastKnownTaskId ?: activeState?.lastKnownTaskId ?: INVALID_TASK_ID
+        val stopTargetTaskId = state?.stopTargetTaskId ?: activeState?.stopTargetTaskId ?: INVALID_TASK_ID
+        val stopTargetSource = state?.stopTargetResolutionSource ?: activeState?.stopTargetResolutionSource ?: "null"
         val sessionStatus = state?.status?.name ?: activeState?.status?.name ?: "null"
         val activeSessionId = activeState?.sessionId ?: "null"
         val displayId = currentVisibleId ?: currentExecutionId
@@ -2546,6 +3077,8 @@ class SessionCoordinator(
             append(" surfaceDisplayId=").append(surfaceId ?: "null")
             append(" taskId=").append(tid)
             append(" targetTaskId=").append(targetTaskId)
+            append(" stopTargetTaskId=").append(stopTargetTaskId)
+            append(" stopTargetSource=").append(stopTargetSource)
             append(" sessionTaskId=").append(tid)
             append(" step=").append(stp)
             append(" actionType=").append(at)
@@ -2574,17 +3107,44 @@ class SessionCoordinator(
     }
 }
 
-internal fun bindStopMigrationState(
+internal const val STOP_TARGET_UNRESOLVED_CODE = "STOP_TARGET_UNRESOLVED"
+internal const val STOP_TARGET_SOURCE_SESSION_TASK = "session_task"
+internal const val STOP_TARGET_SOURCE_CURRENT_TOP_TASK = "current_front_top_task"
+internal const val STOP_TARGET_SOURCE_REUSED_LAST_KNOWN = "reused_last_known_current_front_match"
+internal const val STOP_TARGET_SOURCE_UNRESOLVED_QUERY_UNSUPPORTED =
+    "unresolved_task_query_unsupported"
+internal const val STOP_TARGET_SOURCE_UNRESOLVED_NO_FRONT_TASK = "unresolved_no_front_task"
+internal const val STOP_TARGET_SOURCE_UNRESOLVED_DEAD_TASK = "unresolved_dead_task"
+internal const val STOP_TARGET_SOURCE_UNRESOLVED_WRONG_DISPLAY =
+    "unresolved_not_on_execution_display"
+internal const val STOP_TARGET_SOURCE_UNRESOLVED_AGENT_HOST_TASK =
+    "unresolved_agenthost_task"
+internal const val STOP_TARGET_SOURCE_UNRESOLVED_INVALID_PACKAGE =
+    "unresolved_invalid_top_package"
+internal const val STOP_TARGET_SOURCE_UNRESOLVED_BOOTSTRAP_ONLY_SHELL =
+    "unresolved_bootstrap_only_shell_task"
+
+internal data class StopMigrationTargetResolution(
+    val selectedTarget: TaskMigrationTarget?,
+    val observedTask: TaskMigrationTarget? = selectedTarget,
+    val resolutionSource: String,
+    val failureCode: String? = null
+) {
+    val isResolved: Boolean
+        get() = selectedTarget != null && failureCode == null
+}
+
+internal fun bindBootstrapTargetState(
     state: SessionState,
+    forceRefresh: Boolean = false,
     resolveTarget: (SessionState) -> TaskMigrationTarget?
 ): SessionState {
-    if (state.displayMode != SessionDisplayMode.VIRTUAL_DISPLAY || state.lastKnownTaskId > 0) {
+    if (state.bootstrapTarget == SessionBootstrapTarget.NONE ||
+        (!forceRefresh && state.lastKnownTaskId > 0)
+    ) {
         return state
     }
-    val target = resolveTarget(state) ?: return state.copy(
-        lastMigrationCode = "TARGET_TASK_NOT_FOUND",
-        lastMigrationDirection = "TO_MAIN"
-    )
+    val target = resolveTarget(state) ?: return state
     return state.copy(
         lastKnownTaskId = target.taskId,
         lastKnownTopActivity = target.topActivity,
@@ -2598,10 +3158,119 @@ internal fun bindStopMigrationState(
 internal fun preferredStopMigrationTaskId(state: SessionState): Int {
     return when {
         state.displayMode == SessionDisplayMode.VIRTUAL_DISPLAY &&
-            state.lastKnownTaskId > 0 -> state.lastKnownTaskId
+            state.stopTargetTaskId > 0 -> state.stopTargetTaskId
 
         state.displayMode == SessionDisplayMode.VIRTUAL_DISPLAY -> -1
 
         else -> state.sessionTaskId
     }
+}
+
+internal fun resolveStopMigrationTarget(
+    state: SessionState,
+    taskQuerySupported: Boolean,
+    currentTopTask: TaskMigrationTarget?,
+    agentHostPackage: String
+): StopMigrationTargetResolution {
+    if (state.displayMode != SessionDisplayMode.VIRTUAL_DISPLAY) {
+        val target = if (state.sessionTaskId > 0) {
+            TaskMigrationTarget(
+                taskId = state.sessionTaskId,
+                displayId = Display.DEFAULT_DISPLAY,
+                topActivity = null,
+                packageName = null
+            )
+        } else {
+            null
+        }
+        return if (target != null) {
+            StopMigrationTargetResolution(
+                selectedTarget = target,
+                resolutionSource = STOP_TARGET_SOURCE_SESSION_TASK
+            )
+        } else {
+            StopMigrationTargetResolution(
+                selectedTarget = null,
+                resolutionSource = STOP_TARGET_SOURCE_UNRESOLVED_NO_FRONT_TASK,
+                failureCode = STOP_TARGET_UNRESOLVED_CODE
+            )
+        }
+    }
+    if (!taskQuerySupported) {
+        return StopMigrationTargetResolution(
+            selectedTarget = null,
+            resolutionSource = STOP_TARGET_SOURCE_UNRESOLVED_QUERY_UNSUPPORTED,
+            failureCode = STOP_TARGET_UNRESOLVED_CODE
+        )
+    }
+    val observedTask = currentTopTask ?: return StopMigrationTargetResolution(
+        selectedTarget = null,
+        resolutionSource = STOP_TARGET_SOURCE_UNRESOLVED_NO_FRONT_TASK,
+        failureCode = STOP_TARGET_UNRESOLVED_CODE
+    )
+    if (observedTask.taskId <= 0) {
+        return StopMigrationTargetResolution(
+            selectedTarget = null,
+            observedTask = observedTask,
+            resolutionSource = STOP_TARGET_SOURCE_UNRESOLVED_DEAD_TASK,
+            failureCode = STOP_TARGET_UNRESOLVED_CODE
+        )
+    }
+    if (observedTask.displayId != state.executionDisplayId) {
+        return StopMigrationTargetResolution(
+            selectedTarget = null,
+            observedTask = observedTask,
+            resolutionSource = STOP_TARGET_SOURCE_UNRESOLVED_WRONG_DISPLAY,
+            failureCode = STOP_TARGET_UNRESOLVED_CODE
+        )
+    }
+    val packageName = observedTask.packageName
+    if (packageName.isNullOrBlank()) {
+        return StopMigrationTargetResolution(
+            selectedTarget = null,
+            observedTask = observedTask,
+            resolutionSource = STOP_TARGET_SOURCE_UNRESOLVED_INVALID_PACKAGE,
+            failureCode = STOP_TARGET_UNRESOLVED_CODE
+        )
+    }
+    if (packageName == agentHostPackage) {
+        return StopMigrationTargetResolution(
+            selectedTarget = null,
+            observedTask = observedTask,
+            resolutionSource = STOP_TARGET_SOURCE_UNRESOLVED_AGENT_HOST_TASK,
+            failureCode = STOP_TARGET_UNRESOLVED_CODE
+        )
+    }
+    if (isBootstrapOnlyShellStopTask(state, observedTask)) {
+        return StopMigrationTargetResolution(
+            selectedTarget = null,
+            observedTask = observedTask,
+            resolutionSource = STOP_TARGET_SOURCE_UNRESOLVED_BOOTSTRAP_ONLY_SHELL,
+            failureCode = STOP_TARGET_UNRESOLVED_CODE
+        )
+    }
+    val resolutionSource = if (state.lastKnownTaskId > 0 && state.lastKnownTaskId == observedTask.taskId) {
+        STOP_TARGET_SOURCE_REUSED_LAST_KNOWN
+    } else {
+        STOP_TARGET_SOURCE_CURRENT_TOP_TASK
+    }
+    return StopMigrationTargetResolution(
+        selectedTarget = observedTask,
+        observedTask = observedTask,
+        resolutionSource = resolutionSource
+    )
+}
+
+internal fun isBootstrapOnlyShellStopTask(
+    state: SessionState,
+    target: TaskMigrationTarget
+): Boolean {
+    if (state.bootstrapTarget != SessionBootstrapTarget.SECONDARY_HOME) {
+        return false
+    }
+    if (target.packageName != "com.android.launcher3") {
+        return false
+    }
+    val topActivity = target.topActivity
+    return topActivity.isNullOrBlank() || topActivity.contains("SecondaryDisplayLauncher")
 }

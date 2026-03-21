@@ -9,7 +9,7 @@ class AgentControlCoordinatorTest {
     @Test
     fun askUserProducesCoordinatorHandoffRequestNotSessionCompletion() {
         val coordinator = AgentControlCoordinator()
-        val before = ObservationResult.Captured(base64Png = "ZmFrZS1h", width = 1080, height = 1920)
+        val before = captured("ZmFrZS1h")
         val resolution = coordinator.resolveAction(
             sessionId = "handoff-session",
             step = 1,
@@ -34,9 +34,10 @@ class AgentControlCoordinatorTest {
         )
 
         assertEquals(StepResultCategory.LOW_YIELD_HANDOFF, post.resultSummary.category)
+        assertEquals(GoalSatisfactionStatus.NEED_USER, post.goalStatus)
         assertFalse(post.requestSessionComplete)
         assertTrue(post.requestUserHandoff)
-        assertEquals("连续多步没有明显推进，当前需要你接手确认下一步。", post.handoffQuestion)
+        assertEquals("请输入验证码", post.handoffQuestion)
     }
 
     @Test
@@ -50,16 +51,16 @@ class AgentControlCoordinatorTest {
         )
 
         assertEquals(SubgoalPhase.NEED_OPEN_PARENT.name, snapshot.currentPhase)
-        assertEquals(CompletionVerdict.NOT_SATISFIED.name, snapshot.completionState)
+        assertEquals(GoalSatisfactionStatus.UNSURE.name, snapshot.completionState)
         assertFalse(snapshot.doneOnly)
         assertTrue(snapshot.allowedActions.contains("ASK_USER"))
         assertTrue(snapshot.allowedActions.contains("DONE"))
     }
 
     @Test
-    fun localRoiConfirmationCountsAsProgressEvenWhenWholeFrameLooksUnchanged() {
+    fun localRoiConfirmationCanSatisfyToggleGoalWithoutModelDone() {
         val coordinator = AgentControlCoordinator()
-        val before = ObservationResult.Captured(base64Png = "ZmFrZS1h", width = 1080, height = 1920)
+        val before = captured("ZmFrZS1h")
         val action = CanonicalAction(
             type = CanonicalActionType.CLICK,
             coordSpace = CanonicalCoordSpace.IMAGE_PIXEL,
@@ -86,17 +87,175 @@ class AgentControlCoordinatorTest {
             localChangeConfirmedPoint = CanonicalPoint(960, 570)
         )
 
-        assertEquals(StepResultCategory.SUCCESS_CHANGED, post.resultSummary.category)
-        assertEquals("LOCAL_ROI_CHANGE_CONFIRMED", post.resultSummary.code)
+        assertEquals(GoalSatisfactionStatus.SATISFIED, post.goalStatus)
+        assertEquals(StepResultCategory.COMPLETION_SATISFIED, post.resultSummary.category)
+        assertTrue(post.requestSessionComplete)
         assertTrue(post.observationChanged == true)
+        assertFalse(post.requestUserHandoff)
+    }
+
+    @Test
+    fun openAppLocalRoiWithoutSurfaceEvidenceDoesNotSatisfyGoal() {
+        val coordinator = AgentControlCoordinator()
+        val before = captured("ZmFrZS1h")
+        val action = CanonicalAction(
+            type = CanonicalActionType.CLICK,
+            coordSpace = CanonicalCoordSpace.IMAGE_PIXEL,
+            point = CanonicalPoint(929, 1766)
+        )
+        val resolution = coordinator.resolveAction(
+            sessionId = "open-app-local-roi-session",
+            step = 1,
+            command = "打开日历",
+            beforeObservation = before,
+            action = action,
+            surfaceContext = SurfaceContext(
+                topPackage = "com.android.launcher3",
+                topActivity = "com.android.launcher3.secondarydisplay.SecondaryDisplayLauncher"
+            )
+        )
+
+        val post = coordinator.finalizeStep(
+            sessionId = "open-app-local-roi-session",
+            step = 1,
+            command = "打开日历",
+            beforeObservation = before,
+            afterObservation = before,
+            resolution = resolution,
+            executionResult = ActionExecutionResult(ok = true, code = "OK", details = "tap injected"),
+            controlSyntheticCode = null,
+            controlSyntheticDetails = null,
+            localChangeConfirmedPoint = CanonicalPoint(929, 1766),
+            surfaceContext = SurfaceContext(
+                topPackage = "com.android.launcher3",
+                topActivity = "com.android.launcher3.secondarydisplay.SecondaryDisplayLauncher"
+            )
+        )
+
+        assertEquals(GoalSatisfactionStatus.UNSURE, post.goalStatus)
+        assertFalse(post.requestSessionComplete)
+        assertFalse(post.requestUserHandoff)
+    }
+
+    @Test
+    fun surfaceMatchCanSatisfyGoalWithoutModelDone() {
+        val coordinator = AgentControlCoordinator()
+        val before = captured("ZmFrZS1h")
+        val after = captured("ZmFrZS1i")
+        val resolution = coordinator.resolveAction(
+            sessionId = "surface-match-session",
+            step = 1,
+            command = "open settings",
+            beforeObservation = before,
+            action = CanonicalAction(
+                type = CanonicalActionType.CLICK,
+                coordSpace = CanonicalCoordSpace.IMAGE_PIXEL,
+                point = CanonicalPoint(540, 960)
+            ),
+            surfaceContext = SurfaceContext(
+                topPackage = "launcher",
+                topActivity = "launcher.Home"
+            )
+        )
+
+        val post = coordinator.finalizeStep(
+            sessionId = "surface-match-session",
+            step = 1,
+            command = "open settings",
+            beforeObservation = before,
+            afterObservation = after,
+            resolution = resolution,
+            executionResult = ActionExecutionResult(ok = true, code = "OK", details = "tap injected"),
+            controlSyntheticCode = null,
+            controlSyntheticDetails = null,
+            surfaceContext = SurfaceContext(
+                topPackage = "com.android.settings",
+                topActivity = "com.android.settings.Settings"
+            )
+        )
+
+        assertEquals(GoalSatisfactionStatus.SATISFIED, post.goalStatus)
+        assertTrue(post.requestSessionComplete)
+    }
+
+    @Test
+    fun openAppLocalRoiWithTargetSurfaceEvidenceCanSatisfyGoal() {
+        val coordinator = AgentControlCoordinator()
+        val before = captured("ZmFrZS1h")
+        val after = captured("ZmFrZS1i")
+        val action = CanonicalAction(
+            type = CanonicalActionType.CLICK,
+            coordSpace = CanonicalCoordSpace.IMAGE_PIXEL,
+            point = CanonicalPoint(929, 1766)
+        )
+        val resolution = coordinator.resolveAction(
+            sessionId = "open-app-surface-match-session",
+            step = 1,
+            command = "打开日历",
+            beforeObservation = before,
+            action = action,
+            surfaceContext = SurfaceContext(
+                topPackage = "com.android.launcher3",
+                topActivity = "com.android.launcher3.secondarydisplay.SecondaryDisplayLauncher"
+            )
+        )
+
+        val post = coordinator.finalizeStep(
+            sessionId = "open-app-surface-match-session",
+            step = 1,
+            command = "打开日历",
+            beforeObservation = before,
+            afterObservation = after,
+            resolution = resolution,
+            executionResult = ActionExecutionResult(ok = true, code = "OK", details = "tap injected"),
+            controlSyntheticCode = null,
+            controlSyntheticDetails = null,
+            localChangeConfirmedPoint = CanonicalPoint(929, 1766),
+            surfaceContext = SurfaceContext(
+                topPackage = "com.android.calendar",
+                topActivity = "com.android.calendar.AllInOneActivity"
+            )
+        )
+
+        assertEquals(GoalSatisfactionStatus.SATISFIED, post.goalStatus)
+        assertTrue(post.requestSessionComplete)
+    }
+
+    @Test
+    fun observationChangedNoiseDoesNotForceGoalDecision() {
+        val coordinator = AgentControlCoordinator()
+        val before = captured("ZmFrZS1h")
+        val after = captured("ZmFrZS1i")
+        val resolution = coordinator.resolveAction(
+            sessionId = "noise-session",
+            step = 1,
+            command = "scroll the list",
+            beforeObservation = before,
+            action = CanonicalAction(type = CanonicalActionType.WAIT, durationMs = 500L)
+        )
+
+        val post = coordinator.finalizeStep(
+            sessionId = "noise-session",
+            step = 1,
+            command = "scroll the list",
+            beforeObservation = before,
+            afterObservation = after,
+            resolution = resolution,
+            executionResult = null,
+            controlSyntheticCode = "WAIT_ELAPSED",
+            controlSyntheticDetails = "durationMs=500"
+        )
+
+        assertEquals(GoalSatisfactionStatus.UNSURE, post.goalStatus)
+        assertFalse(post.requestSessionComplete)
         assertFalse(post.requestUserHandoff)
     }
 
     @Test
     fun samePhaseChangedClickArmsToggleSuppressionWithoutExplicitLocalRoi() {
         val coordinator = AgentControlCoordinator()
-        val before = ObservationResult.Captured(base64Png = "ZmFrZS1h", width = 1080, height = 1920)
-        val after = ObservationResult.Captured(base64Png = "ZmFrZS1i", width = 1080, height = 1920)
+        val before = captured("ZmFrZS1h")
+        val after = captured("ZmFrZS1i")
         val action = CanonicalAction(
             type = CanonicalActionType.CLICK,
             coordSpace = CanonicalCoordSpace.IMAGE_PIXEL,
@@ -110,7 +269,7 @@ class AgentControlCoordinatorTest {
             beforeObservation = before,
             action = action
         )
-        val firstPost = coordinator.finalizeStep(
+        coordinator.finalizeStep(
             sessionId = "toggle-infer-session",
             step = 1,
             command = "关闭显示密码",
@@ -122,8 +281,6 @@ class AgentControlCoordinatorTest {
             controlSyntheticDetails = null
         )
 
-        assertEquals(StepResultCategory.SUCCESS_CHANGED, firstPost.resultSummary.category)
-
         val blocked = coordinator.resolveAction(
             sessionId = "toggle-infer-session",
             step = 2,
@@ -132,8 +289,8 @@ class AgentControlCoordinatorTest {
             action = action
         )
 
-        assertEquals(GuardrailDecisionType.BLOCK_REPLACE, blocked.guardrailDecision.type)
-        assertEquals("TOGGLE_REPEAT_CLICK_SUPPRESSED", blocked.guardrailDecision.rule)
+        assertEquals(RecoveryDecisionType.OVERRIDE, blocked.recoveryDecision.type)
+        assertEquals("TOGGLE_REPEAT_CLICK_SUPPRESSED", blocked.recoveryDecision.rule)
         assertEquals("WAIT", blocked.finalAction.actionType())
     }
 
@@ -142,8 +299,8 @@ class AgentControlCoordinatorTest {
         val coordinator = AgentControlCoordinator(
             config = GuardrailConfig(toggleRepeatSuppressionWindow = 1)
         )
-        val before = ObservationResult.Captured(base64Png = "ZmFrZS1h", width = 1080, height = 1920)
-        val after = ObservationResult.Captured(base64Png = "ZmFrZS1i", width = 1080, height = 1920)
+        val before = captured("ZmFrZS1h")
+        val after = captured("ZmFrZS1i")
         val action = CanonicalAction(
             type = CanonicalActionType.CLICK,
             coordSpace = CanonicalCoordSpace.IMAGE_PIXEL,
@@ -176,7 +333,7 @@ class AgentControlCoordinatorTest {
             beforeObservation = after,
             action = action
         )
-        assertEquals("TOGGLE_REPEAT_CLICK_SUPPRESSED", blockedAtStep2.guardrailDecision.rule)
+        assertEquals("TOGGLE_REPEAT_CLICK_SUPPRESSED", blockedAtStep2.recoveryDecision.rule)
         coordinator.finalizeStep(
             sessionId = "toggle-refresh-session",
             step = 2,
@@ -185,8 +342,8 @@ class AgentControlCoordinatorTest {
             afterObservation = after,
             resolution = blockedAtStep2,
             executionResult = null,
-            controlSyntheticCode = blockedAtStep2.guardrailDecision.rule,
-            controlSyntheticDetails = blockedAtStep2.guardrailDecision.message
+            controlSyntheticCode = blockedAtStep2.recoveryDecision.rule,
+            controlSyntheticDetails = blockedAtStep2.recoveryDecision.message
         )
 
         val blockedAtStep3 = coordinator.resolveAction(
@@ -197,8 +354,16 @@ class AgentControlCoordinatorTest {
             action = action
         )
 
-        assertEquals(GuardrailDecisionType.BLOCK_REPLACE, blockedAtStep3.guardrailDecision.type)
-        assertEquals("TOGGLE_REPEAT_CLICK_SUPPRESSED", blockedAtStep3.guardrailDecision.rule)
+        assertEquals(RecoveryDecisionType.OVERRIDE, blockedAtStep3.recoveryDecision.type)
+        assertEquals("TOGGLE_REPEAT_CLICK_SUPPRESSED", blockedAtStep3.recoveryDecision.rule)
         assertEquals("WAIT", blockedAtStep3.finalAction.actionType())
+    }
+
+    private fun captured(base64: String): ObservationResult.Captured {
+        return ObservationResult.Captured(
+            base64Png = base64,
+            width = 1080,
+            height = 1920
+        )
     }
 }
