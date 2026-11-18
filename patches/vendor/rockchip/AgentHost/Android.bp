@@ -1,0 +1,16 @@
+android_app_import {
+    name: "AgentHost",
+    apk: "AgentHost.apk",
+    certificate: "platform",
+    privileged: true,
+    dex_preopt: {
+        enabled: false,
+    },
+}
+
+prebuilt_etc {
+    name: "privapp-permissions-agenthost",
+    src: "privapp-permissions-agenthost.xml",
+    sub_dir: "permissions",
+    filename_from_src: true,
+}

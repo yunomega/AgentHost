@@ -1,0 +1,11 @@
+// service_contexts (system/sepolicy/private)
+// 注册 agenthost_platform contexts 映射（line 79）
+// 完整文件为 AOSP/vendor 源码，此处仅保留 AgentHost 相关改动片段，行号为备份中近似位置。
+
+activity_task                             u:object_r:activity_task_service:s0
+adb                                       u:object_r:adb_service:s0
+adservices_manager                        u:object_r:adservices_manager_service:s0
+agenthost_platform                        u:object_r:agenthost_platform_service:s0
+aidl_lazy_test_1                          u:object_r:aidl_lazy_test_service:s0
+aidl_lazy_test_2                          u:object_r:aidl_lazy_test_service:s0
+aidl_lazy_cb_test                         u:object_r:aidl_lazy_test_service:s0

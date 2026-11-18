@@ -1,0 +1,17 @@
+<!-- vendor/rockchip/AgentHost/privapp-permissions-agenthost.xml -->
+<!-- 同时也需要在 Android.bp / Android.mk 里把此文件安装到
+     /system/etc/permissions/ 目录 -->
+
+<permissions>
+    <privapp-permissions package="com.example.agenthost">
+        <!-- 必须与 AndroidManifest.xml 里申请的 protectionLevel≥signature 的权限完全对应 -->
+        <permission name="android.permission.INJECT_EVENTS"/>
+        <permission name="android.permission.CAPTURE_VIDEO_OUTPUT"/>
+        <permission name="android.permission.READ_FRAME_BUFFER"/>
+        <permission name="android.permission.MANAGE_ACTIVITY_TASKS"/>
+        <permission name="android.permission.REMOVE_TASKS"/>
+        <permission name="android.permission.STATUS_BAR_SERVICE"/>
+        <permission name="android.permission.ADD_TRUSTED_DISPLAY"/>
+        <permission name="android.permission.ASSOCIATE_INPUT_DEVICE_TO_DISPLAY"/>
+    </privapp-permissions>
+</permissions>

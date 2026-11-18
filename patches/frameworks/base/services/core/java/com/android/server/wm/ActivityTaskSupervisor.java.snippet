@@ -1,0 +1,22 @@
+// ActivityTaskSupervisor.java
+// 启动门禁：isLaunchAllowedOnExecutionDisplay 放行执行显示会话 UID（~line 1214）
+// 完整文件为 AOSP/vendor 源码，此处仅保留 AgentHost 相关改动片段，行号为备份中近似位置。
+
+            return true;
+        }
+
+        if (uidPresentOnDisplay) {
+            ProtoLog.d(WM_DEBUG_TASKS, "Launch on display check: allow launch for caller "
+                    + "present on the display");
+            return true;
+        }
+
+        if (mService.mExecutionDisplayPolicyController.isLaunchAllowedOnExecutionDisplay(
+                launchDisplayId, callingUid)) {
+            ProtoLog.d(WM_DEBUG_TASKS, "Launch on display check: allow launch for execution "
+                    + "display policy");
+            return true;
+        }
+
+        Slog.w(TAG, "Launch on display check: denied");
+        return false;

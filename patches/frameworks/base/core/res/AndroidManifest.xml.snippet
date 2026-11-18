@@ -1,0 +1,15 @@
+// AndroidManifest.xml (framework-res)
+// 声明签名级权限 ACCESS_PLATFORM_AUTOMATION（~line 6088）
+// 完整文件为 AOSP/vendor 源码，此处仅保留 AgentHost 相关改动片段，行号为备份中近似位置。
+
+        android:protectionLevel="signature|privileged" />
+
+    <!-- Allows AgentHost to access the display-scoped automation platform service.
+         @hide <p>Not for use by third-party applications.</p> -->
+    <permission android:name="com.example.agenthost.permission.ACCESS_PLATFORM_AUTOMATION"
+        android:protectionLevel="signature|privileged" />
+
+    <!-- Allows an app to set the theme overlay in /vendor/overlay
+         being used.
+         @hide  <p>Not for use by third-party applications.</p> -->
+    <permission android:name="android.permission.MODIFY_THEME_OVERLAY"

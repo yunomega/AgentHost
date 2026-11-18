@@ -1,0 +1,58 @@
+// ActivityTaskManagerService.java
+// 新增字段/构造初始化/Internal 转发实现（lines ~774, ~845, ~5559-5590）
+// 完整文件为 AOSP/vendor 源码，此处仅保留 AgentHost 相关改动片段，行号为备份中近似位置。
+
+    TaskOrganizerController mTaskOrganizerController;
+    TaskFragmentOrganizerController mTaskFragmentOrganizerController;
+    final ExecutionDisplayPolicyController mExecutionDisplayPolicyController;
+
+    @Nullable
+
+// ...
+
+        mVisibleActivityProcessTracker = new VisibleActivityProcessTracker(this);
+        mInternal = new LocalService();
+        mExecutionDisplayPolicyController = new ExecutionDisplayPolicyController(this);
+        GL_ES_VERSION = SystemProperties.getInt("ro.opengles.version", GL_ES_VERSION_UNDEFINED);
+        mWindowOrganizerController = new WindowOrganizerController(this);
+
+// ...
+
+            }
+        }
+
+        @Override
+        public Bundle registerExecutionDisplaySession(String sessionId, int executionDisplayId,
+                int registrantUid) {
+            synchronized (mGlobalLock) {
+                return mExecutionDisplayPolicyController.registerExecutionDisplaySession(
+                        sessionId, executionDisplayId, registrantUid);
+            }
+        }
+
+        @Override
+        public Bundle updateExecutionDisplaySessionState(String sessionId, int executionDisplayId,
+                String state, String reason) {
+            synchronized (mGlobalLock) {
+                return mExecutionDisplayPolicyController.updateExecutionDisplaySessionState(
+                        sessionId, executionDisplayId, state, reason);
+            }
+        }
+
+        @Override
+        public Bundle clearExecutionDisplaySession(String sessionId, String reason) {
+            synchronized (mGlobalLock) {
+                return mExecutionDisplayPolicyController.clearExecutionDisplaySession(
+                        sessionId, reason);
+            }
+        }
+
+        @Override
+        public Bundle startExecutionDisplayStartupTarget(String sessionId, int executionDisplayId,
+                String startupMode, String componentName, String reason) {
+            return mExecutionDisplayPolicyController.startExecutionDisplayStartupTarget(
+                    sessionId, executionDisplayId, startupMode, componentName, reason);
+        }
+
+        @Override
+        public int startActivitiesAsPackage(String packageName, @Nullable String featureId,

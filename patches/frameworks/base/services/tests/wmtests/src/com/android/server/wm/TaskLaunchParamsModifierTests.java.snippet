@@ -1,0 +1,77 @@
+// TaskLaunchParamsModifierTests.java
+// 新增 3 个执行显示策略路由测试（~line 1823 起）
+// 完整文件为 AOSP/vendor 源码，此处仅保留 AgentHost 相关改动片段，行号为备份中近似位置。
+
+            mAtm.mSupportsMultiDisplay = orgValue;
+        }
+    }
+
+    @Test
+    public void testExecutionDisplayPolicyRoutesAgentHostLaunchToExecutionDisplay() {
+        final int registrantUid = 11001;
+        final TestDisplayContent executionDisplay = createPrivateDisplayContent(
+                WINDOWING_MODE_FULLSCREEN, registrantUid);
+        final Request request = new Request();
+        request.callingPackage = "com.example.agenthost";
+        request.realCallingUid = registrantUid;
+
+        mAtm.mExecutionDisplayPolicyController.registerExecutionDisplaySession(
+                "session-exec", executionDisplay.mDisplayId, registrantUid);
+
+        assertEquals(RESULT_CONTINUE,
+                new CalculateRequestBuilder().setRequest(request).calculate());
+        assertEquals(executionDisplay.getDefaultTaskDisplayArea(),
+                mResult.mPreferredTaskDisplayArea);
+        assertTrue(mAtm.mExecutionDisplayPolicyController.hasAdditionalDisplayAccessUid(
+                mActivity.getUid()));
+    }
+
+    @Test
+    public void testExecutionDisplayPolicyRespectsExplicitMainDisplay() {
+        final int registrantUid = 11002;
+        final TestDisplayContent executionDisplay = createPrivateDisplayContent(
+                WINDOWING_MODE_FULLSCREEN, registrantUid);
+        final Request request = new Request();
+        request.callingPackage = "com.example.agenthost";
+        request.realCallingUid = registrantUid;
+        final ActivityOptions options = ActivityOptions.makeBasic();
+        options.setLaunchDisplayId(DEFAULT_DISPLAY);
+
+        mAtm.mExecutionDisplayPolicyController.registerExecutionDisplaySession(
+                "session-main", executionDisplay.mDisplayId, registrantUid);
+
+        assertEquals(RESULT_CONTINUE, new CalculateRequestBuilder()
+                .setRequest(request)
+                .setOptions(options)
+                .calculate());
+        assertEquals(mRootWindowContainer.getDefaultTaskDisplayArea(),
+                mResult.mPreferredTaskDisplayArea);
+    }
+
+    @Test
+    public void testExecutionDisplayPolicyStopsForUserHandoff() {
+        final int registrantUid = 11003;
+        final TestDisplayContent executionDisplay = createPrivateDisplayContent(
+                WINDOWING_MODE_FULLSCREEN, registrantUid);
+        final Request request = new Request();
+        request.callingPackage = "com.example.agenthost";
+        request.realCallingUid = registrantUid;
+
+        mAtm.mExecutionDisplayPolicyController.registerExecutionDisplaySession(
+                "session-handoff", executionDisplay.mDisplayId, registrantUid);
+        mAtm.mExecutionDisplayPolicyController.updateExecutionDisplaySessionState(
+                "session-handoff", executionDisplay.mDisplayId,
+                ExecutionDisplayPolicyController.STATE_USER_HANDOFF, "test");
+
+        assertEquals(RESULT_CONTINUE,
+                new CalculateRequestBuilder().setRequest(request).calculate());
+        assertEquals(mRootWindowContainer.getDefaultTaskDisplayArea(),
+                mResult.mPreferredTaskDisplayArea);
+    }
+
+    private TestDisplayContent createNewDisplayContent(int windowingMode) {
+        return createNewDisplayContent(windowingMode, DISPLAY_BOUNDS, DISPLAY_STABLE_BOUNDS);
+    }
+
+    private TestDisplayContent createPrivateDisplayContent(int windowingMode, int ownerUid) {
+        final DisplayInfo info = new DisplayInfo();

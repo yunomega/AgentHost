@@ -1,0 +1,27 @@
+// TaskLaunchParamsModifier.java
+// 启动路由：adjustLaunchTaskDisplayArea 决定是否落到执行显示（~line 468）
+// 完整文件为 AOSP/vendor 源码，此处仅保留 AgentHost 相关改动片段，行号为备份中近似位置。
+
+                if (DEBUG) appendLog("display-from-caller=" + callerDisplayId);
+            }
+        }
+
+        if (taskDisplayArea == null) {
+            taskDisplayArea = currentParams.mPreferredTaskDisplayArea;
+        }
+
+        taskDisplayArea = mSupervisor.mService.mExecutionDisplayPolicyController
+                .adjustLaunchTaskDisplayArea(taskDisplayArea, task, options, source,
+                        activityRecord, request);
+
+        // Re-route to default display if the device didn't declare support for multi-display
+        if (taskDisplayArea != null && !mSupervisor.mService.mSupportsMultiDisplay
+                && taskDisplayArea.getDisplayId() != DEFAULT_DISPLAY) {
+            taskDisplayArea = mSupervisor.mRootWindowContainer.getDefaultTaskDisplayArea();
+        }
+
+        // Re-route to default display if the home activity doesn't support multi-display
+        if (taskDisplayArea != null && activityRecord.isActivityTypeHome()
+                && !mSupervisor.mRootWindowContainer.canStartHomeOnDisplayArea(activityRecord.info,
+                        taskDisplayArea, false /* allowInstrumenting */)) {
+            taskDisplayArea = mSupervisor.mRootWindowContainer.getDefaultTaskDisplayArea();

@@ -4,7 +4,7 @@
 
 一个在定制 Android（AOSP）系统里运行的 AI agent 宿主：它能"看"屏幕（显示截屏）、能"动手"（注入输入事件）、并在独立虚拟显示上执行任务——主屏不受影响。宿主应用与 Android Framework 两侧协同：应用侧负责任务编排与模型调用，Framework 侧提供受权限管控的平台能力。
 
-> ⚠️ 本仓为**应用侧**源码（宿主 App + 设计文档 + 测试脚本）。Framework 侧改动位于 RK3588 vendor AOSP 源码树，随系统镜像构建，未随本仓发布；改动面见下文「Framework 侧」。
+> ⚠️ 本仓为**应用侧**源码（宿主 App + 设计文档 + 测试脚本）。Framework 侧改动位于 RK3588 vendor AOSP 源码树，随系统镜像构建；改动摘录见 [`patches/`](patches/README.md)（新增文件为完整源码，改动文件为 `.snippet` 片段），改动面见下文「Framework 侧」。
 
 ## 架构总览
 
@@ -33,6 +33,8 @@
 模型侧：应用经 HTTP 网关（OpenAI 兼容接口）接入视觉语言模型，解析屏幕观察并下发 GUI 动作；另保留脚本化规划器作无模型兜底与回归基线。
 
 ## Framework 侧改动（vendor 源码树）
+
+源码摘录见 [`patches/`](patches/README.md)：新增文件为完整源码，改动文件为 `.snippet` 片段（标注原文件近似行号）。
 
 | 位置 | 改动 |
 | --- | --- |
@@ -72,6 +74,7 @@
 app/        宿主应用（Kotlin + Jetpack Compose，minSdk 24 / targetSdk 35）
 app/src/main/aidl/   平台服务 AIDL 接口
 docs/       设计、审计与评估文档
+patches/    Framework 侧改动摘录（新增文件完整源码 + 改动文件 .snippet 片段）
 scripts/    签名部署、回归、压测、代理与冒烟脚本
 ```
 

@@ -1,0 +1,19 @@
+// SystemServer.java
+// 启动 AgentHostPlatformService（~line 1200）
+// 完整文件为 AOSP/vendor 源码，此处仅保留 AgentHost 相关改动片段，行号为备份中近似位置。
+
+        t.traceBegin("StartDisplayManager");
+        mDisplayManagerService = mSystemServiceManager.startService(DisplayManagerService.class);
+        t.traceEnd();
+
+        t.traceBegin("StartAgentHostPlatformService");
+        mSystemServiceManager.startService(
+                com.android.server.agenthost.AgentHostPlatformService.class);
+        t.traceEnd();
+
+        // We need the default display before we can initialize the package manager.
+        t.traceBegin("WaitForDisplay");
+        mSystemServiceManager.startBootPhase(t, SystemService.PHASE_WAIT_FOR_DEFAULT_DISPLAY);
+        t.traceEnd();
+
+        // Only run "core" apps if we're encrypting the device.

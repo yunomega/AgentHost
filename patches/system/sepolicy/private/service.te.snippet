@@ -1,0 +1,9 @@
+// service.te (system/sepolicy/private)
+// 新增 service 类型 agenthost_platform_service（line 2）
+// 完整文件为 AOSP/vendor 源码，此处仅保留 AgentHost 相关改动片段，行号为备份中近似位置。
+
+type ambient_context_service,       app_api_service, system_server_service, service_manager_type;
+type agenthost_platform_service,    system_api_service, system_server_service, service_manager_type;
+type attention_service,             system_server_service, service_manager_type;
+type compos_service,                service_manager_type;
+type communal_service,      app_api_service, system_server_service, service_manager_type;

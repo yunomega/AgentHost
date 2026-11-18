@@ -1,0 +1,49 @@
+// ActivityTaskSupervisorTests.java
+// 新增 2 个执行显示启动门禁测试（~line 292 起）
+// 完整文件为 AOSP/vendor 源码，此处仅保留 AgentHost 相关改动片段，行号为备份中近似位置。
+
+        assertThat(allowedOnUntrusted).isFalse();
+    }
+
+    @Test
+    public void testExecutionDisplayPolicyAllowsRegistrantOnRegisteredPrivateDisplay() {
+        final int registrantUid = 12001;
+        final ActivityInfo activityInfo = new ActivityInfo();
+        final DisplayContent executionDisplay = createPrivateDisplay(22001);
+
+        mAtm.mExecutionDisplayPolicyController.registerExecutionDisplaySession(
+                "session-private", executionDisplay.getDisplayId(), registrantUid);
+
+        final boolean allowed = mSupervisor.isCallerAllowedToLaunchOnDisplay(12001, registrantUid,
+                executionDisplay.getDisplayId(), activityInfo);
+
+        assertThat(allowed).isTrue();
+    }
+
+    @Test
+    public void testExecutionDisplayPolicyDoesNotAllowUnregisteredPrivateDisplay() {
+        final int registrantUid = 12002;
+        final ActivityInfo activityInfo = new ActivityInfo();
+        final DisplayContent executionDisplay = createPrivateDisplay(22002);
+        final DisplayContent otherPrivateDisplay = createPrivateDisplay(22003);
+
+        mAtm.mExecutionDisplayPolicyController.registerExecutionDisplaySession(
+                "session-private-other", executionDisplay.getDisplayId(), registrantUid);
+
+        final boolean allowed = mSupervisor.isCallerAllowedToLaunchOnDisplay(12002, registrantUid,
+                otherPrivateDisplay.getDisplayId(), activityInfo);
+
+        assertThat(allowed).isFalse();
+    }
+
+    /**
+     * Verifies that process state will be updated with pending top without activity state change.
+     * E.g. switch focus between resumed activities in multi-window mode.
+     */
+    @Test
+    public void testUpdatePendingTopForTopResumed() {
+        final Task task1 = new TaskBuilder(mSupervisor)
+                .setWindowingMode(WINDOWING_MODE_MULTI_WINDOW).build();
+        final ActivityRecord activity1 = new ActivityBuilder(mAtm)
+                .setTask(task1).setUid(ActivityBuilder.DEFAULT_FAKE_UID + 1).build();
+        task1.setResumedActivity(activity1, "test");

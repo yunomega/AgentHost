@@ -1,0 +1,11 @@
+// package_allowed_list.txt (build/soong check_boot_jars)
+// 放行 com.example.agenthost.platform 入 boot jar（line 256-257）
+// 完整文件为 AOSP/vendor 源码，此处仅保留 AgentHost 相关改动片段，行号为备份中近似位置。
+
+org\.chromium\.arc
+org\.chromium\.arc\..*
+
+
+com\.example\.agenthost\.platform
+com\.example\.agenthost\.platform\..*
+

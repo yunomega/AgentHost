@@ -1,0 +1,53 @@
+// WindowManagerService.java
+// 私有显示访问日志/门禁接入执行显示策略（~line 1520）
+// 完整文件为 AOSP/vendor 源码，此处仅保留 AgentHost 相关改动片段，行号为备份中近似位置。
+
+
+            final DisplayContent displayContent = getDisplayContentOrCreate(displayId, attrs.token);
+
+            if (displayContent == null) {
+                ProtoLog.w(WM_ERROR, "Attempted to add window to a display that does "
+                        + "not exist: %d. Aborting.", displayId);
+                return WindowManagerGlobal.ADD_INVALID_DISPLAY;
+            }
+            final ExecutionDisplayPolicyController executionDisplayPolicyController =
+                    mAtmService.mExecutionDisplayPolicyController;
+            final boolean logExecutionDisplayAccess = displayContent.isPrivate()
+                    && executionDisplayPolicyController.getExecutionDisplayId()
+                    == displayContent.getDisplayId();
+            final boolean hasDisplayAccess = displayContent.hasAccess(session.mUid);
+            if (logExecutionDisplayAccess) {
+                final boolean uidListedInDisplayAccessAllowlist =
+                        mRoot.isUidListedInDisplayAccessAllowlist(displayContent.getDisplayId(),
+                                session.mUid);
+                Slog.i(TAG, "event=execution_display_add_window_access_check"
+                        + " sessionId="
+                        + (executionDisplayPolicyController.getActiveSessionId() != null
+                                ? executionDisplayPolicyController.getActiveSessionId()
+                                : "null")
+                        + " displayId=" + displayContent.getDisplayId()
+                        + " uid=" + session.mUid
+                        + " package="
+                        + (attrs.packageName != null
+                                ? attrs.packageName.replace('\n', ' ')
+                                : "null")
+                        + " type=" + type
+                        + " uidListedInDisplayAccessAllowlist="
+                        + uidListedInDisplayAccessAllowlist
+                        + " hasAccess=" + hasDisplayAccess
+                        + " displayAccessUids="
+                        + mRoot.getDisplayAccessAllowlistDebugString(
+                                displayContent.getDisplayId()));
+            }
+            if (!hasDisplayAccess) {
+                ProtoLog.w(WM_ERROR,
+                        "Attempted to add window to a display for which the application "
+                                + "does not have access: %d.  Aborting.",
+                        displayContent.getDisplayId());
+                return WindowManagerGlobal.ADD_INVALID_DISPLAY;
+            }
+
+            if (mWindowMap.containsKey(client.asBinder())) {
+                ProtoLog.w(WM_ERROR, "Window %s is already added", client);
+                return WindowManagerGlobal.ADD_DUPLICATE_ADD;
+            }

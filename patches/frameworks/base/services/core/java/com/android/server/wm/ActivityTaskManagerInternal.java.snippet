@@ -1,0 +1,31 @@
+// ActivityTaskManagerInternal.java
+// 新增 4 个执行显示会话 internal 方法（~line 240 起）
+// 完整文件为 AOSP/vendor 源码，此处仅保留 AgentHost 相关改动片段，行号为备份中近似位置。
+
+     * Sets the list of UIDs that contain an active accessibility service.
+     */
+    public abstract void setAccessibilityServiceUids(IntArray uids);
+
+    /**
+     * Registers a single active execution-display session for AgentHost automation.
+     */
+    public abstract Bundle registerExecutionDisplaySession(String sessionId,
+            int executionDisplayId, int registrantUid);
+
+    /**
+     * Updates the state of the active execution-display session.
+     */
+    public abstract Bundle updateExecutionDisplaySessionState(String sessionId,
+            int executionDisplayId, String state, String reason);
+
+    /**
+     * Clears the active execution-display session.
+     */
+    public abstract Bundle clearExecutionDisplaySession(String sessionId, String reason);
+
+    /**
+     * Starts a framework-managed startup target on the active execution display.
+     */
+    public abstract Bundle startExecutionDisplayStartupTarget(String sessionId,
+            int executionDisplayId, String startupMode, String componentName, String reason);
+

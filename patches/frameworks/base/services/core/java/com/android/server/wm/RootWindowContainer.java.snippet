@@ -1,0 +1,39 @@
+// RootWindowContainer.java
+// 显示访问白名单追加执行显示 UID + 同步日志（~line 2586, 2595）
+// 完整文件为 AOSP/vendor 源码，此处仅保留 AgentHost 相关改动片段，行号为备份中近似位置。
+
+        for (int displayNdx = getChildCount() - 1; displayNdx >= 0; --displayNdx) {
+            final DisplayContent displayContent = getChildAt(displayNdx);
+            // Only bother calculating the allowlist for private displays
+            if (displayContent.isPrivate()) {
+                mDisplayAccessUIDs.append(
+                        displayContent.mDisplayId, displayContent.getPresentUIDs());
+            }
+        }
+        mService.mExecutionDisplayPolicyController.appendAdditionalDisplayAccessUids(
+                mDisplayAccessUIDs);
+        // Store updated lists in DisplayManager. Callers from outside of AM should get them there.
+        mDisplayManagerInternal.setDisplayAccessUIDs(mDisplayAccessUIDs);
+        logDisplayAccessAllowlistSync(syncSource, requestedUid, reason);
+    }
+
+    private void logDisplayAccessAllowlistSync(@NonNull String syncSource, int requestedUid,
+            @Nullable String reason) {
+        final ExecutionDisplayPolicyController controller =
+                mService.mExecutionDisplayPolicyController;
+        final int executionDisplayId = controller.getExecutionDisplayId();
+        if (!DISPLAY_ACCESS_SYNC_SOURCE_IMMEDIATE_PUSH.equals(syncSource)
+                && executionDisplayId == INVALID_DISPLAY) {
+            return;
+        }
+        Slog.i(TAG, "event=display_access_allowlist_sync"
+                + " syncSource=" + syncSource
+                + " sessionId=" + sanitizeForLog(controller.getActiveSessionId())
+                + " executionDisplayId=" + executionDisplayId
+                + " requestedUid=" + requestedUid
+                + " reason=" + sanitizeForLog(reason)
+                + " executionDisplayAccessUids="
+                + getDisplayAccessAllowlistDebugString(executionDisplayId)
+                + " additionalDisplayAccessUids="
+                + controller.getAdditionalDisplayAccessUidsDebugString());
+    }
